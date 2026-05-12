@@ -109,10 +109,14 @@ def create_download(request: DownloadRequest) -> DownloadResponse:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     history_manager.add_item(
-        url=response["url"],
-        status=response["status"],
-        log_path=response["log_path"],
-        pid=response["pid"],
+        url=str(response["url"]),
+        title="",
+        download_dir=request.download_dir,
+        output_file=request.output_template,
+        mode=request.download_mode,
+        format_value=_history_format(request),
+        status=str(response["status"]),
+        error="",
     )
     return DownloadResponse(**response)
 
@@ -183,6 +187,18 @@ def index() -> FileResponse:
     """Serve the static frontend shell."""
 
     return FileResponse(STATIC_DIR / "index.html")
+
+
+def _history_format(request: DownloadRequest) -> str:
+    """Return the format value saved into download history."""
+
+    if request.selected_format.strip():
+        return request.selected_format.strip()
+    if request.download_mode == "audio":
+        return request.audio_format.strip() or "mp3"
+    if request.download_mode == "video_audio":
+        return "bestvideo+bestaudio/best"
+    return request.format_mode.strip() or "best"
 
 
 def _tail_file(path: Path, line_count: int) -> list[str]:

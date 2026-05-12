@@ -203,6 +203,11 @@ h3 {
   background: linear-gradient(135deg, #fb7185, var(--danger));
 }
 
+.button--small {
+  padding: 0.45rem 0.7rem;
+  font-size: 0.85rem;
+}
+
 .form-grid,
 .settings-layout {
   display: grid;

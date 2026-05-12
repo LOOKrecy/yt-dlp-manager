@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -152,12 +152,15 @@ class HistoryItem(BaseModel):
     """Stored download history entry."""
 
     id: str
+    datetime: str
     url: str
+    title: str = ""
+    download_dir: str = ""
+    output_file: str = ""
+    mode: str = ""
+    format: str = ""
     status: str
-    created_at: str
-    log_path: str = ""
-    pid: int | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
 
 
 class HistoryResponse(BaseModel):
