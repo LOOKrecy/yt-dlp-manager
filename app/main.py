@@ -1,10 +1,12 @@
-"""FastAPI entry point for the local yt-dlp manager application."""
+from __future__ import annotations
+
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config_manager import get_config
+from app.config_manager import get_config, load_config, save_config
 from app.history_manager import HistoryManager
 from app.models import DownloadRequest, HealthResponse
 from app.path_utils import STATIC_DIR, ensure_project_directories
@@ -33,7 +35,7 @@ def health() -> HealthResponse:
 
     return HealthResponse()
 
-
+ 
 @app.get("/api/config")
 def read_config() -> dict[str, str | int]:
     """Return public local application configuration."""
@@ -59,7 +61,11 @@ def create_download(request: DownloadRequest) -> dict[str, str]:
     """Accept a future download request and return a placeholder status."""
 
     return ytdlp_service.prepare_download(request)
-
+  
+@app.post("/api/config")
+def update_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Persist and return the updated application configuration."""
+    return save_config(config)
 
 @app.get("/")
 def index() -> FileResponse:
