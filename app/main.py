@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config_manager import get_config, load_config, save_config
 from app.history_manager import HistoryManager
 from app.models import DownloadRequest, HealthResponse
-from app.path_utils import STATIC_DIR, ensure_project_directories
+from app.path_utils import STATIC_DIR, ensure_project_directories, get_environment_status
 from app.process_manager import ProcessManager
 from app.ytdlp_service import YtDlpService
 
@@ -47,6 +47,13 @@ def read_config() -> dict[str, str | int]:
         "data_dir": str(config.data_dir),
         "logs_dir": str(config.logs_dir),
     }
+
+
+@app.get("/api/environment")
+def read_environment() -> dict[str, dict[str, dict[str, str | bool]]]:
+    """Return local runtime directory and bundled tool availability."""
+
+    return get_environment_status()
 
 
 @app.get("/api/history")

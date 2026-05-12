@@ -68,3 +68,63 @@ h1 {
   margin: 0;
   color: #86efac;
 }
+
+.settings-card {
+  margin-top: 1.5rem;
+}
+
+h2,
+h3 {
+  margin: 0;
+}
+
+h2 {
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
+}
+
+h3 {
+  color: #e2e8f0;
+  font-size: 1rem;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+.environment-list {
+  margin-top: 1rem;
+}
+
+.environment-list dd {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: end;
+  text-align: right;
+}
+
+.environment-list small {
+  max-width: 22rem;
+  overflow-wrap: anywhere;
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
+.success {
+  color: #86efac;
+}
+
+.error {
+  color: #fca5a5;
+}
+
+@media (min-width: 56rem) {
+  .shell {
+    align-content: center;
+  }
+
+  .settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
