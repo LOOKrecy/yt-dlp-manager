@@ -7,40 +7,287 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <section class="card">
-        <p class="eyebrow">Local only</p>
-        <h1>yt-dlp Manager</h1>
-        <p>Минимальный локальный интерфейс для будущего управления загрузками yt-dlp.</p>
-        <dl id="status" class="status">
-          <div><dt>Backend</dt><dd>Проверяем…</dd></div>
-          <div><dt>Host</dt><dd>127.0.0.1</dd></div>
-          <div><dt>Port</dt><dd>8765</dd></div>
-        </dl>
-      </section>
-
-      <section class="card settings-card" aria-labelledby="settings-title">
-        <p class="eyebrow">Настройки</p>
-        <h2 id="settings-title">Проверка окружения</h2>
-        <p>Рабочие папки создаются автоматически, а наличие бинарных файлов проверяется локально.</p>
-
-        <div class="settings-grid">
-          <section aria-labelledby="directories-title">
-            <h3 id="directories-title">Рабочие папки</h3>
-            <dl id="environment-directories" class="status environment-list">
-              <div><dt>Загрузка</dt><dd>Проверяем…</dd></div>
-            </dl>
-          </section>
-
-          <section aria-labelledby="tools-title">
-            <h3 id="tools-title">Инструменты</h3>
-            <dl id="environment-tools" class="status environment-list">
-              <div><dt>Загрузка</dt><dd>Проверяем…</dd></div>
-            </dl>
-          </section>
+    <div class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Local only · 127.0.0.1:8765</p>
+          <h1>yt-dlp Manager</h1>
+          <p class="hero__lead">Локальная оболочка для проверки форматов, запуска загрузок и просмотра логов.</p>
         </div>
-      </section>
-    </main>
+        <dl id="status" class="status-strip" aria-label="Статус приложения">
+          <div>
+            <dt>Backend</dt>
+            <dd>Проверяем…</dd>
+          </div>
+          <div>
+            <dt>Загрузка</dt>
+            <dd id="running-status">Нет</dd>
+          </div>
+        </dl>
+      </header>
+
+      <nav class="tabs" aria-label="Основные разделы">
+        <button class="tab-button is-active" type="button" data-tab-target="download">Загрузка</button>
+        <button class="tab-button" type="button" data-tab-target="formats">Форматы</button>
+        <button class="tab-button" type="button" data-tab-target="logs">Логи</button>
+        <button class="tab-button" type="button" data-tab-target="result">Результат</button>
+        <button class="tab-button" type="button" data-tab-target="history">История</button>
+        <button class="tab-button" type="button" data-tab-target="settings">Настройки</button>
+      </nav>
+
+      <main class="panels">
+        <section id="tab-download" class="panel is-active" aria-labelledby="download-title">
+          <div class="panel__header">
+            <div>
+              <p class="eyebrow">Загрузка</p>
+              <h2 id="download-title">Параметры запуска</h2>
+            </div>
+            <div class="actions">
+              <button id="load-formats-button" class="button button--secondary requires-url" type="button" disabled>Получить форматы</button>
+              <button id="start-download-button" class="button requires-url" type="button" disabled>Скачать</button>
+              <button id="stop-download-button" class="button button--danger" type="button">Остановить</button>
+            </div>
+          </div>
+
+          <form id="download-form" class="form-grid">
+            <label class="field field--wide">
+              <span>URL</span>
+              <input id="url" name="last_url" type="url" autocomplete="off" placeholder="https://…" />
+            </label>
+
+            <label class="field">
+              <span>Папка загрузки</span>
+              <input id="download-dir" name="download_dir" type="text" placeholder="Downloads" />
+            </label>
+
+            <label class="field">
+              <span>Шаблон имени</span>
+              <input id="output-template" name="output_template" type="text" placeholder="%(title)s.%(ext)s" />
+            </label>
+
+            <label class="field">
+              <span>Режим</span>
+              <select id="download-mode" name="download_mode">
+                <option value="video">Видео</option>
+                <option value="video_audio">Видео + аудио</option>
+                <option value="audio">Только аудио</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Формат</span>
+              <select id="format-mode" name="format_mode">
+                <option value="best">Лучший</option>
+                <option value="worst">Худший</option>
+                <option value="selected">Выбранный code</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Format code</span>
+              <input id="selected-format" name="selected_format" type="text" placeholder="bestvideo+bestaudio/best" />
+            </label>
+
+            <label class="field">
+              <span>Audio format</span>
+              <select id="audio-format" name="audio_format">
+                <option value="mp3">mp3</option>
+                <option value="m4a">m4a</option>
+                <option value="opus">opus</option>
+                <option value="wav">wav</option>
+                <option value="flac">flac</option>
+              </select>
+            </label>
+
+            <label class="field field--wide">
+              <span>Дополнительные аргументы</span>
+              <input id="extra-args" name="extra_args" type="text" placeholder="--no-mtime --verbose" />
+            </label>
+
+            <fieldset class="option-group field--wide">
+              <legend>Дополнительно</legend>
+              <label><input id="embed-metadata" name="embed_metadata" type="checkbox" /> Встроить metadata</label>
+              <label><input id="embed-thumbnail" name="embed_thumbnail" type="checkbox" /> Встроить thumbnail</label>
+              <label><input id="write-subtitles" name="write_subtitles" type="checkbox" /> Скачать субтитры</label>
+              <label><input id="write-auto-subtitles" name="write_auto_subtitles" type="checkbox" /> Авто-субтитры</label>
+              <label><input id="playlist-enabled" name="playlist_enabled" type="checkbox" /> Плейлист</label>
+              <label><input id="overwrite-files" name="overwrite_files" type="checkbox" /> Перезаписывать файлы</label>
+              <label><input id="restrict-filenames" name="restrict_filenames" type="checkbox" /> Безопасные имена файлов</label>
+            </fieldset>
+
+            <label class="field">
+              <span>Язык субтитров</span>
+              <input id="subtitles-language" name="subtitles_language" type="text" placeholder="ru,en" />
+            </label>
+
+            <label class="field">
+              <span>Плейлист: начало</span>
+              <input id="playlist-start" name="playlist_start" type="number" min="1" />
+            </label>
+
+            <label class="field">
+              <span>Плейлист: конец</span>
+              <input id="playlist-end" name="playlist_end" type="number" min="1" />
+            </label>
+          </form>
+        </section>
+
+        <section id="tab-formats" class="panel" aria-labelledby="formats-title" hidden>
+          <div class="panel__header">
+            <div>
+              <p class="eyebrow">Форматы</p>
+              <h2 id="formats-title">Доступные format code</h2>
+            </div>
+            <button id="refresh-formats-button" class="button button--secondary requires-url" type="button" disabled>Обновить</button>
+          </div>
+          <p id="formats-message" class="muted">Введите URL и нажмите «Получить форматы».</p>
+          <div class="table-wrap">
+            <table id="formats-table">
+              <thead>
+                <tr>
+                  <th>Code</th>
+                  <th>Extension</th>
+                  <th>Resolution</th>
+                  <th>Note</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <details class="raw-output">
+            <summary>Raw output</summary>
+            <pre id="formats-raw"></pre>
+          </details>
+        </section>
+
+        <section id="tab-logs" class="panel" aria-labelledby="logs-title" hidden>
+          <div class="panel__header">
+            <div>
+              <p class="eyebrow">Логи</p>
+              <h2 id="logs-title">Последний вывод yt-dlp</h2>
+            </div>
+            <button id="refresh-logs-button" class="button button--secondary" type="button">Обновить</button>
+          </div>
+          <p id="log-path" class="muted">Лог пока не выбран.</p>
+          <pre id="logs-output" class="log-box">Логи появятся после запуска команды.</pre>
+        </section>
+
+        <section id="tab-result" class="panel" aria-labelledby="result-title" hidden>
+          <div class="panel__header">
+            <div>
+              <p class="eyebrow">Результат</p>
+              <h2 id="result-title">Последний запуск</h2>
+            </div>
+          </div>
+          <div id="result-card" class="result-card muted">Загрузка еще не запускалась.</div>
+        </section>
+
+        <section id="tab-history" class="panel" aria-labelledby="history-title" hidden>
+          <div class="panel__header">
+            <div>
+              <p class="eyebrow">История</p>
+              <h2 id="history-title">Сохраненные запуски</h2>
+            </div>
+            <div class="actions">
+              <button id="refresh-history-button" class="button button--secondary" type="button">Обновить</button>
+              <button id="clear-history-button" class="button button--danger" type="button">Очистить</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="history-table">
+              <thead>
+                <tr>
+                  <th>Дата</th>
+                  <th>Status</th>
+                  <th>URL</th>
+                  <th>PID</th>
+                  <th>Log</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="tab-settings" class="panel" aria-labelledby="settings-title" hidden>
+          <div class="panel__header">
+            <div>
+              <p class="eyebrow">Настройки</p>
+              <h2 id="settings-title">Конфигурация и окружение</h2>
+            </div>
+            <button id="save-config-button" class="button" type="button">Сохранить</button>
+          </div>
+
+          <form id="settings-form" class="settings-layout">
+            <fieldset class="settings-card">
+              <legend>Proxy</legend>
+              <label class="toggle"><input id="proxy-enabled" name="proxy_enabled" type="checkbox" data-toggle-controls="proxy-fields" /> Включить proxy</label>
+              <div id="proxy-fields" class="nested-fields">
+                <label class="field">
+                  <span>Proxy URL</span>
+                  <input id="proxy-url" name="proxy_url" type="text" placeholder="http://127.0.0.1:8080" />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="settings-card">
+              <legend>Cookies</legend>
+              <label class="toggle"><input id="cookies-enabled" name="cookies_enabled" type="checkbox" data-toggle-controls="cookies-fields" /> Использовать cookies</label>
+              <div id="cookies-fields" class="nested-fields">
+                <label class="field">
+                  <span>Файл cookies</span>
+                  <input id="cookies-file" name="cookies_file" type="text" placeholder="data/cookies.txt" />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="settings-card">
+              <legend>Fragment / section</legend>
+              <label class="toggle"><input id="section-enabled" name="section_enabled" type="checkbox" data-toggle-controls="section-fields" /> Скачать фрагмент</label>
+              <div id="section-fields" class="nested-fields two-columns">
+                <label class="field">
+                  <span>Начало</span>
+                  <input id="section-start" name="section_start" type="text" placeholder="00:00:10" />
+                </label>
+                <label class="field">
+                  <span>Конец</span>
+                  <input id="section-end" name="section_end" type="text" placeholder="00:01:30" />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset class="settings-card">
+              <legend>Impersonate</legend>
+              <label class="toggle"><input id="impersonate-enabled" name="impersonate_enabled" type="checkbox" data-toggle-controls="impersonate-fields" /> Включить impersonate</label>
+              <div id="impersonate-fields" class="nested-fields">
+                <label class="field">
+                  <span>Target</span>
+                  <input id="impersonate-target" name="impersonate_target" type="text" placeholder="chrome" />
+                </label>
+              </div>
+            </fieldset>
+          </form>
+
+          <div class="environment-grid">
+            <section>
+              <h3>Рабочие папки</h3>
+              <dl id="environment-directories" class="status-list">
+                <div><dt>Загрузка</dt><dd>Проверяем…</dd></div>
+              </dl>
+            </section>
+            <section>
+              <h3>Инструменты</h3>
+              <dl id="environment-tools" class="status-list">
+                <div><dt>Загрузка</dt><dd>Проверяем…</dd></div>
+              </dl>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    </div>
+
     <script src="/static/app.js"></script>
   </body>
 </html>
