@@ -489,7 +489,7 @@ function renderHistory(items) {
   if (!items.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = 10;
     cell.className = "muted";
     cell.textContent = "История пуста.";
     row.append(cell);
@@ -499,14 +499,63 @@ function renderHistory(items) {
 
   items.forEach((item) => {
     const row = document.createElement("tr");
-    const date = item.created_at ? new Date(item.created_at).toLocaleString() : "—";
-    [date, item.status, item.url, item.pid || "—", item.log_path || "—"].forEach((value) => {
+    const date = item.datetime ? new Date(item.datetime).toLocaleString() : "—";
+    [
+      date,
+      item.title || "—",
+      item.url,
+      item.download_dir || "—",
+      item.output_file || "—",
+      item.mode || "—",
+      item.format || "—",
+      item.status,
+      item.error || "—",
+    ].forEach((value) => {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
     });
+
+    const actionsCell = document.createElement("td");
+    const repeatButton = document.createElement("button");
+    repeatButton.className = "button button--secondary button--small";
+    repeatButton.type = "button";
+    repeatButton.textContent = "Повторить";
+    repeatButton.addEventListener("click", () => repeatHistoryItem(item));
+    actionsCell.append(repeatButton);
+    row.append(actionsCell);
+
     historyTableBody.append(row);
   });
+}
+
+function repeatHistoryItem(item) {
+  writeFieldValue(fieldByName("last_url"), item.url || "");
+  writeFieldValue(fieldByName("download_dir"), item.download_dir || "Downloads");
+  writeFieldValue(fieldByName("output_template"), item.output_file || "%(title)s.%(ext)s");
+
+  if (item.mode) {
+    writeFieldValue(fieldByName("download_mode"), item.mode);
+  }
+
+  const formatValue = item.format || "";
+  selectedFormatCode = "";
+  if (["best", "worst"].includes(formatValue)) {
+    writeFieldValue(fieldByName("format_mode"), formatValue);
+    writeFieldValue(fieldByName("selected_format"), "");
+  } else if (item.mode === "audio" && formatValue) {
+    writeFieldValue(fieldByName("audio_format"), formatValue);
+  } else if (formatValue) {
+    writeFieldValue(fieldByName("format_mode"), "selected");
+    writeFieldValue(fieldByName("selected_format"), formatValue);
+    selectedFormatCode = formatValue;
+  }
+
+  updateUrlButtons();
+  updateDependentControls();
+  queueSaveConfig();
+  switchTab("download");
+  showToast("Параметры из истории подставлены в форму");
 }
 
 async function loadHistory() {
