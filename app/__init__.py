@@ -1,1 +1,1 @@
-"""Application package for yt-dlp-manager."""
+"""Local yt-dlp Manager backend package."""
