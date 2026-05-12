@@ -23,6 +23,32 @@ class HealthResponse(BaseModel):
 
 
 class DownloadRequest(BaseModel):
-    """Minimal request model for future download jobs."""
+    """Request model for yt-dlp format lookups and download jobs."""
 
     url: str = Field(..., min_length=1)
+    proxy_enabled: bool = False
+    proxy_url: str = ""
+    cookies_enabled: bool = False
+    cookies_file: str = ""
+    section_enabled: bool = False
+    section_start: str = ""
+    section_end: str = ""
+    impersonate_enabled: bool = False
+    impersonate_target: str = ""
+    download_mode: str = "video"
+    audio_format: str = "mp3"
+    format_mode: str = "best"
+    selected_format: str = ""
+    extra_args: str = ""
+    embed_metadata: bool = True
+    embed_thumbnail: bool = False
+    write_subtitles: bool = False
+    write_auto_subtitles: bool = False
+    subtitles_language: str = ""
+    playlist_enabled: bool = False
+    playlist_start: str = ""
+    playlist_end: str = ""
+    overwrite_files: bool = False
+    restrict_filenames: bool = False
+    output_template: str = "%(title)s.%(ext)s"
+    download_dir: str = "Downloads"

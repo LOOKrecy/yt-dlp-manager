@@ -65,14 +65,23 @@ def read_history() -> list[dict[str, object]]:
 
 @app.post("/api/download")
 def create_download(request: DownloadRequest) -> dict[str, str]:
-    """Accept a future download request and return a placeholder status."""
+    """Start a yt-dlp download request."""
 
     return ytdlp_service.prepare_download(request)
-  
+
+
+@app.post("/api/download/stop")
+def stop_download() -> dict[str, str]:
+    """Stop the current yt-dlp download process."""
+
+    return ytdlp_service.stop_download()
+
+
 @app.post("/api/config")
 def update_config(config: dict[str, Any]) -> dict[str, Any]:
     """Persist and return the updated application configuration."""
     return save_config(config)
+
 
 @app.get("/")
 def index() -> FileResponse:
