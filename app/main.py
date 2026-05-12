@@ -1,249 +1,203 @@
 from __future__ import annotations
 
-import os
-import platform
+import asyncio
+import json
 import subprocess
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config_manager import get_config, load_config, save_config
-from app.history_manager import HistoryManager
-from app.models import (
-    ClearHistoryResponse,
-    ConfigResponse,
-    ConfigUpdateRequest,
-    DownloadRequest,
-    DownloadResponse,
-    EnvironmentResponse,
-    FormatRequest,
-    FormatResponse,
-    HealthResponse,
-    HistoryResponse,
-    LogResponse,
-    OpenPathRequest,
-    OpenPathResponse,
-    StopDownloadResponse,
-)
-from app.path_utils import (
-    LOGS_DIR,
-    STATIC_DIR,
-    ensure_project_directories,
-    get_environment_status,
-)
+from app.config_manager import load_config, save_config
+from app.history_manager import clear_history, load_history
+from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathRequest, ToolActionRequest
+from app.path_utils import FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, open_with_system, resolve_user_path
 from app.process_manager import ProcessManager
-from app.ytdlp_service import YtDlpService
+from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, parse_formats, quote_command
 
-app_config = get_config()
-process_manager = ProcessManager()
-history_manager = HistoryManager()
-ytdlp_service = YtDlpService(process_manager)
-
-app = FastAPI(title="yt-dlp Manager", version="0.1.0")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app = FastAPI(title="Local yt-dlp Manager")
+manager = ProcessManager()
+event_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=500)
+manager.set_event_queue(event_queue)
 
 
 @app.on_event("startup")
-def on_startup() -> None:
-    """Ensure local runtime directories exist before serving requests."""
-
-    ensure_project_directories()
-
-
-@app.get("/api/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    """Return a minimal health-check payload."""
-
-    return HealthResponse()
+def startup() -> None:
+    load_config()
+    environment_status(include_versions=False)
 
 
-@app.get("/api/config", response_model=ConfigResponse)
-def read_config() -> ConfigResponse:
-    """Return the persisted frontend configuration."""
-
-    return ConfigResponse(**load_config())
+@app.get("/api/config")
+def get_config() -> dict:
+    return {"config": load_config().model_dump()}
 
 
-@app.post("/api/config", response_model=ConfigResponse)
-def update_config(request: ConfigUpdateRequest) -> ConfigResponse:
-    """Persist and return the updated frontend configuration."""
-
-    updated_config = {**load_config(), **request.model_dump(exclude_unset=True)}
-    return ConfigResponse(**save_config(updated_config))
+@app.post("/api/config")
+def post_config(config: AppConfig) -> dict:
+    return {"config": save_config(config).model_dump()}
 
 
-@app.get("/api/environment", response_model=EnvironmentResponse)
-def read_environment() -> EnvironmentResponse:
-    """Return local runtime directory and bundled tool availability."""
-
-    return EnvironmentResponse(**get_environment_status())
+@app.get("/api/environment")
+def get_environment(include_versions: bool = False) -> dict:
+    return environment_status(include_versions=include_versions)
 
 
-@app.post("/api/formats", response_model=FormatResponse)
-def read_formats(request: FormatRequest) -> FormatResponse:
-    """Return available yt-dlp formats for a URL."""
-
+@app.get("/api/impersonate-targets")
+def impersonate_targets() -> dict:
+    if not YT_DLP_PATH.exists():
+        return {"targets": FALLBACK_IMPERSONATE_TARGETS, "fallback": True}
     try:
-        return ytdlp_service.list_formats(request)
+        completed = subprocess.run(
+            [str(YT_DLP_PATH), "--list-impersonate-targets"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            shell=False,
+        )
+    except Exception:
+        return {"targets": FALLBACK_IMPERSONATE_TARGETS, "fallback": True}
+    if completed.returncode != 0:
+        return {"targets": FALLBACK_IMPERSONATE_TARGETS, "fallback": True}
+    targets = []
+    for line in completed.stdout.splitlines():
+        text = line.strip()
+        if text and not text.startswith("-") and " " not in text and text.lower() not in {"available", "impersonate", "targets:"}:
+            targets.append(text.rstrip(":"))
+    return {"targets": targets or FALLBACK_IMPERSONATE_TARGETS, "fallback": not bool(targets)}
+
+
+@app.post("/api/formats")
+def get_formats(request: FormatRequest) -> dict:
+    try:
+        command = build_format_command(request)
+        manager.emit("log", f"Команда запроса форматов: {quote_command(command)}")
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            shell=False,
+        )
+        raw_output = (completed.stdout or "") + (completed.stderr or "")
+        for line in raw_output.splitlines():
+            manager.emit("log", line)
+        return {
+            "success": completed.returncode == 0,
+            "formats": [item.model_dump() for item in parse_formats(raw_output)],
+            "raw_output": raw_output,
+            "command": quote_command(command),
+            "error": "" if completed.returncode == 0 else f"yt-dlp -F завершился с кодом {completed.returncode}",
+        }
+    except ValueError as exc:
+        manager.emit("log", f"Ошибка запроса форматов: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/download")
+def start_download(request: DownloadRequest) -> dict:
+    try:
+        config = AppConfig(**request.model_dump(exclude={"url", "last_url"}), last_url=request.url)
+        save_config(config)
+        job_id = manager.start_download(request)
+        return {"success": True, "job_id": job_id}
+    except ValueError as exc:
+        manager.emit("log", f"Ошибка запуска загрузки: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/download/stop")
+def stop_download() -> dict:
+    stopped = manager.stop()
+    return {"success": stopped, "message": "Download process stopped" if stopped else "Нет активной загрузки"}
+
+
+@app.get("/api/logs")
+def get_logs() -> dict:
+    return manager.get_logs()
+
+
+@app.post("/api/logs/clear")
+def clear_logs() -> dict:
+    manager.clear_logs()
+    return {"success": True}
+
+
+@app.get("/api/events")
+async def events() -> StreamingResponse:
+    async def stream():
+        while True:
+            event = await event_queue.get()
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.get("/api/history")
+def history() -> dict:
+    return {"history": [entry.model_dump() for entry in load_history()]}
+
+
+@app.post("/api/history/clear")
+def clear_history_endpoint() -> dict:
+    clear_history()
+    return {"success": True}
+
+
+@app.post("/api/open-file")
+def open_file(request: OpenPathRequest) -> dict:
+    try:
+        path = resolve_user_path(request.path, None)
+        open_with_system(path)
+        return {"success": True}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail="yt-dlp executable was not found") from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.post("/api/download", response_model=DownloadResponse)
-def create_download(request: DownloadRequest) -> DownloadResponse:
-    """Start a yt-dlp download request."""
-
+@app.post("/api/open-folder")
+def open_folder(request: OpenPathRequest) -> dict:
     try:
-        response = ytdlp_service.prepare_download(request)
+        path = resolve_user_path(request.path, None)
+        folder = path if path.is_dir() else path.parent
+        open_with_system(folder)
+        return {"success": True}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail="yt-dlp executable was not found") from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    history_manager.add_item(
-        url=str(response["url"]),
-        title="",
-        download_dir=request.download_dir,
-        output_file=request.output_template,
-        mode=request.download_mode,
-        format_value=_history_format(request),
-        status=str(response["status"]),
-        error="",
-    )
-    return DownloadResponse(**response)
 
 
-@app.post("/api/download/stop", response_model=StopDownloadResponse)
-def stop_download() -> StopDownloadResponse:
-    """Stop the current yt-dlp download process."""
-
-    return StopDownloadResponse(**ytdlp_service.stop_download())
-
-
-@app.get("/api/logs", response_model=LogResponse)
-def read_logs(lines: int = Query(default=200, ge=1, le=2000)) -> LogResponse:
-    """Return recent lines from the active or latest download log."""
-
-    log_path = process_manager.current_log_path or _latest_log_path()
-    if log_path is None:
-        return LogResponse(running=process_manager.running)
-
-    return LogResponse(
-        log_path=str(log_path),
-        running=process_manager.running,
-        lines=_tail_file(log_path, lines),
-    )
+@app.get("/api/media")
+def media(path: str = Query(...)) -> FileResponse:
+    resolved = resolve_user_path(path, None)
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    return FileResponse(resolved)
 
 
-@app.get("/api/history", response_model=HistoryResponse)
-def read_history() -> HistoryResponse:
-    """Return download history items."""
-
-    return HistoryResponse(items=history_manager.list_items())
-
-
-@app.post("/api/history/clear", response_model=ClearHistoryResponse)
-def clear_history() -> ClearHistoryResponse:
-    """Remove all stored download history items."""
-
-    return ClearHistoryResponse(deleted=history_manager.clear())
-
-
-@app.post("/api/open-file", response_model=OpenPathResponse)
-def open_file(request: OpenPathRequest) -> OpenPathResponse:
-    """Open a local file in the system-associated application."""
-
-    path = _resolve_path(request.path)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-
-    _open_path(path)
-    return OpenPathResponse(path=str(path))
+@app.post("/api/tools")
+def tool_action(request: ToolActionRequest) -> dict:
+    if request.action == "yt-dlp-version":
+        command = [str(YT_DLP_PATH), "--version"]
+    elif request.action == "ffmpeg-version":
+        command = [str(FFMPEG_PATH), "-version"]
+    else:
+        command = [str(YT_DLP_PATH), "-U"]
+    if not Path(command[0]).exists():
+        raise HTTPException(status_code=400, detail=f"Инструмент не найден: {command[0]}")
+    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, shell=False)
+    output = (completed.stdout or "") + (completed.stderr or "")
+    manager.emit("log", f"Команда инструмента: {quote_command(command)}")
+    for line in output.splitlines():
+        manager.emit("log", line)
+    return {"success": completed.returncode == 0, "output": output, "return_code": completed.returncode}
 
 
-@app.post("/api/open-folder", response_model=OpenPathResponse)
-def open_folder(request: OpenPathRequest) -> OpenPathResponse:
-    """Open a local folder in the platform file manager."""
-
-    path = _resolve_path(request.path)
-    folder_path = path.parent if path.is_file() else path
-    if not folder_path.is_dir():
-        raise HTTPException(status_code=404, detail="Folder not found")
-
-    _open_path(folder_path)
-    return OpenPathResponse(path=str(folder_path))
-
-
-@app.get("/")
-def index() -> FileResponse:
-    """Serve the static frontend shell."""
-
-    return FileResponse(STATIC_DIR / "index.html")
-
-
-def _history_format(request: DownloadRequest) -> str:
-    """Return the format value saved into download history."""
-
-    if request.selected_format.strip():
-        return request.selected_format.strip()
-    if request.download_mode == "audio":
-        return request.audio_format.strip() or "mp3"
-    if request.download_mode == "video_audio":
-        return "bestvideo+bestaudio/best"
-    return request.format_mode.strip() or "best"
-
-
-def _tail_file(path: Path, line_count: int) -> list[str]:
-    """Return the last N lines from a UTF-8 text file."""
-
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as log_file:
-            return log_file.read().splitlines()[-line_count:]
-    except OSError:
-        return []
-
-
-def _latest_log_path() -> Path | None:
-    """Return the newest local log file, if one exists."""
-
-    try:
-        return max(LOGS_DIR.glob("*.log"), key=lambda path: path.stat().st_mtime)
-    except ValueError:
-        return None
-
-
-def _resolve_path(path_value: str) -> Path:
-    """Resolve a user-supplied path without requiring it to be absolute."""
-
-    return Path(path_value).expanduser().resolve()
-
-
-def _open_path(path: Path) -> None:
-    """Open a file-system path with the platform default handler."""
-
-    try:
-        if platform.system() == "Windows":
-            os.startfile(path)  # type: ignore[attr-defined]
-            return
-        if platform.system() == "Darwin":
-            command = ["open", str(path)]
-        else:
-            command = ["xdg-open", str(path)]
-
-        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host=app_config.host, port=app_config.port, reload=False)
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8765, reload=False)

@@ -1,617 +1,249 @@
-const configFields = [
-  "last_url",
-  "download_dir",
-  "proxy_enabled",
-  "proxy_url",
-  "cookies_enabled",
-  "cookies_file",
-  "section_enabled",
-  "section_start",
-  "section_end",
-  "impersonate_enabled",
-  "impersonate_target",
-  "download_mode",
-  "audio_format",
-  "format_mode",
-  "selected_format",
-  "extra_args",
-  "embed_metadata",
-  "embed_thumbnail",
-  "write_subtitles",
-  "write_auto_subtitles",
-  "subtitles_language",
-  "playlist_enabled",
-  "playlist_start",
-  "playlist_end",
-  "overwrite_files",
-  "restrict_filenames",
-  "output_template",
-];
+const $ = (id) => document.getElementById(id);
+const state = { config: {}, formats: [], selectedFormat: '', lastResult: null, running: false };
 
-const statusList = document.querySelector("#status");
-const backendStatus = statusList?.querySelector("dd");
-const runningStatus = document.querySelector("#running-status");
-const toast = document.querySelector("#toast");
-const urlInput = document.querySelector("#url");
-const requiresUrlButtons = document.querySelectorAll(".requires-url");
-const formatsTableBody = document.querySelector("#formats-table tbody");
-const formatsMessage = document.querySelector("#formats-message");
-const formatsRaw = document.querySelector("#formats-raw");
-const logsOutput = document.querySelector("#logs-output");
-const logPath = document.querySelector("#log-path");
-const resultCard = document.querySelector("#result-card");
-const historyTableBody = document.querySelector("#history-table tbody");
-const environmentDirectories = document.querySelector("#environment-directories");
-const environmentTools = document.querySelector("#environment-tools");
+const fields = ['url','download_dir','filename_template','proxy_enabled','proxy','cookies_enabled','cookies_file','section_enabled','section_start','section_end','impersonate_enabled','impersonate_target','audio_format','selected_format','extra_args'];
 
-let saveTimer = null;
-let logTimer = null;
-let selectedFormatCode = "";
-
-const statusLabels = {
-  true: "Готово",
-  false: "Не найдено",
-};
-
-function showToast(message, variant = "success") {
-  if (!toast) {
-    return;
-  }
-
-  toast.textContent = message;
-  toast.className = `toast ${variant}`;
-  toast.hidden = false;
-  window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => {
-    toast.hidden = true;
-  }, 3500);
+function showMessage(text, type='ok') {
+  const el = $('message');
+  el.textContent = text;
+  el.className = `message ${type}`;
+  if (!text) el.classList.add('hidden');
 }
 
-function setButtonLoading(button, isLoading, loadingText) {
-  if (!button) {
-    return;
-  }
-
-  if (isLoading) {
-    button.dataset.defaultText = button.textContent;
-    button.textContent = loadingText;
-    button.disabled = true;
-    return;
-  }
-
-  button.textContent = button.dataset.defaultText || button.textContent;
-  updateUrlButtons();
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(panel => panel.classList.toggle('active', panel.id === name));
 }
 
-function updateUrlButtons() {
-  const hasUrl = Boolean(urlInput?.value.trim());
-  requiresUrlButtons.forEach((button) => {
-    button.disabled = !hasUrl;
-  });
-}
-
-function apiErrorMessage(error) {
-  if (typeof error === "string") {
-    return error;
-  }
-  return error?.message || "Неизвестная ошибка";
-}
-
-async function requestJson(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-
-  const contentType = response.headers.get("content-type") || "";
-  const data = contentType.includes("application/json") ? await response.json() : await response.text();
-
-  if (!response.ok) {
-    const detail = typeof data === "object" && data !== null ? data.detail : data;
-    throw new Error(detail || `HTTP ${response.status}`);
-  }
-
-  return data;
-}
-
-function fieldByName(name) {
-  return document.querySelector(`[name="${name}"]`);
-}
-
-function readFieldValue(field) {
-  if (!field) {
-    return "";
-  }
-  if (field.type === "checkbox") {
-    return field.checked;
-  }
-  return field.value;
-}
-
-function writeFieldValue(field, value) {
-  if (!field || value === undefined || value === null) {
-    return;
-  }
-  if (field.type === "checkbox") {
-    field.checked = Boolean(value);
-    return;
-  }
-  field.value = value;
-}
+function getMode() { return document.querySelector('input[name="download_mode"]:checked')?.value || 'video'; }
+function setMode(value) { document.querySelector(`input[name="download_mode"][value="${value}"]`).checked = true; updateControls(); }
 
 function collectConfig() {
-  const config = {};
-  configFields.forEach((name) => {
-    config[name] = readFieldValue(fieldByName(name));
-  });
-  return config;
-}
-
-function buildRequestPayload() {
-  const config = collectConfig();
   return {
-    ...config,
-    url: config.last_url.trim(),
-    selected_format: selectedFormatCode || config.selected_format.trim(),
+    last_url: $('url').value.trim(),
+    download_dir: $('download_dir').value.trim() || 'Downloads',
+    filename_template: $('filename_template').value.trim(),
+    proxy_enabled: $('proxy_enabled').checked,
+    proxy: $('proxy').value.trim(),
+    cookies_enabled: $('cookies_enabled').checked,
+    cookies_file: $('cookies_file').value.trim(),
+    section_enabled: $('section_enabled').checked,
+    section_start: $('section_start').value.trim() || '00:00:00',
+    section_end: $('section_end').value.trim() || '00:00:00',
+    impersonate_enabled: $('impersonate_enabled').checked,
+    impersonate_target: $('impersonate_target').value,
+    download_mode: getMode(),
+    audio_format: $('audio_format').value,
+    format_mode: getMode() === 'manual' ? 'manual' : 'auto',
+    selected_format: $('selected_format').value.trim(),
+    extra_args: $('extra_args').value.trim(),
   };
 }
 
+function collectFormatRequest() {
+  const c = collectConfig();
+  return { url: c.last_url, proxy_enabled: c.proxy_enabled, proxy: c.proxy, cookies_enabled: c.cookies_enabled, cookies_file: c.cookies_file, impersonate_enabled: c.impersonate_enabled, impersonate_target: c.impersonate_target, extra_args: c.extra_args };
+}
+
+function collectDownloadRequest() {
+  const c = collectConfig();
+  return { ...c, url: c.last_url };
+}
+
 function applyConfig(config) {
-  configFields.forEach((name) => writeFieldValue(fieldByName(name), config[name]));
-  selectedFormatCode = config.selected_format || "";
-  updateUrlButtons();
-  updateDependentControls();
-}
-
-function queueSaveConfig() {
-  window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => {
-    saveConfig(false).catch((error) => console.error("Config autosave failed", error));
-  }, 450);
-}
-
-async function loadConfig() {
-  try {
-    const config = await requestJson("/api/config");
-    applyConfig(config);
-  } catch (error) {
-    showToast(`Не удалось загрузить конфигурацию: ${apiErrorMessage(error)}`, "error");
+  state.config = config;
+  $('url').value = config.last_url || '';
+  for (const id of fields) {
+    if (id === 'url') continue;
+    const el = $(id);
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = Boolean(config[id]);
+    else el.value = config[id] ?? '';
   }
+  setMode(config.download_mode || 'video');
+  updateControls();
 }
 
-async function saveConfig(showSuccess = true) {
-  const config = collectConfig();
-  const saved = await requestJson("/api/config", {
-    method: "POST",
-    body: JSON.stringify(config),
-  });
-  applyConfig(saved);
-  if (showSuccess) {
-    showToast("Конфигурация сохранена");
-  }
-  return saved;
+function validateClient() {
+  const c = collectConfig();
+  if (!c.last_url) return 'URL не указан';
+  if (c.proxy_enabled && !c.proxy) return 'Proxy включён, но строка proxy пустая';
+  if (c.cookies_enabled && !c.cookies_file) return 'Cookies-файл включён, но путь не указан';
+  if (c.impersonate_enabled && !c.impersonate_target) return 'Impersonate включён, но target не выбран';
+  if (c.section_enabled && (!c.section_start || !c.section_end)) return 'Фрагмент включён, но время не указано';
+  if (c.download_mode === 'manual' && !c.selected_format) return 'В ручном режиме формат не выбран';
+  return '';
 }
 
-function updateDependentControls() {
-  document.querySelectorAll("[data-toggle-controls]").forEach((checkbox) => {
-    const container = document.querySelector(`#${checkbox.dataset.toggleControls}`);
-    if (!container) {
-      return;
-    }
-
-    container.classList.toggle("is-disabled", !checkbox.checked);
-    container.querySelectorAll("input, select, button").forEach((control) => {
-      control.disabled = !checkbox.checked;
-    });
-  });
+function updateControls() {
+  const hasUrl = $('url').value.trim().length > 0;
+  $('proxy').disabled = !$('proxy_enabled').checked;
+  $('cookies_file').disabled = !$('cookies_enabled').checked;
+  $('impersonate_target').disabled = !$('impersonate_enabled').checked;
+  $('section_start').disabled = !$('section_enabled').checked;
+  $('section_end').disabled = !$('section_enabled').checked;
+  $('formatsBtn').disabled = !hasUrl || state.running;
+  $('downloadBtn').disabled = !hasUrl || state.running || (getMode() === 'manual' && !$('selected_format').value.trim());
+  $('stopBtn').disabled = !state.running;
+  $('audio_format').disabled = getMode() !== 'audio';
+  $('selected_format').disabled = false;
 }
 
-function switchTab(targetName) {
-  document.querySelectorAll(".tab-button").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.tabTarget === targetName);
-  });
-  document.querySelectorAll(".panel").forEach((panel) => {
-    const isTarget = panel.id === `tab-${targetName}`;
-    panel.classList.toggle("is-active", isTarget);
-    panel.hidden = !isTarget;
-  });
+async function api(path, options={}) {
+  const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+  return data;
 }
 
-function renderEnvironmentList(container, items) {
-  if (!container) {
-    return;
-  }
+async function loadConfig() { applyConfig((await api('/api/config')).config); }
+async function saveConfig() { await api('/api/config', { method:'POST', body: JSON.stringify(collectConfig()) }); showMessage('Настройки сохранены'); }
 
-  container.replaceChildren();
-  Object.values(items).forEach((item) => {
-    const row = document.createElement("div");
-    const term = document.createElement("dt");
-    const description = document.createElement("dd");
-    const status = document.createElement("span");
-    const path = document.createElement("small");
-
-    term.textContent = item.name;
-    status.textContent = statusLabels[item.exists];
-    status.className = item.exists ? "success" : "error";
-    path.textContent = item.path;
-
-    description.append(status, path);
-    row.append(term, description);
-    container.append(row);
-  });
+async function loadImpersonateTargets() {
+  const data = await api('/api/impersonate-targets');
+  const select = $('impersonate_target');
+  const current = select.value;
+  select.innerHTML = '<option value="">Выберите target</option>' + data.targets.map(t => `<option>${escapeHtml(t)}</option>`).join('');
+  select.value = current;
 }
 
-function renderEnvironmentError() {
-  [environmentDirectories, environmentTools].forEach((container) => {
-    if (!container) {
-      return;
-    }
-
-    const row = document.createElement("div");
-    const term = document.createElement("dt");
-    const description = document.createElement("dd");
-    term.textContent = "Проверка";
-    description.textContent = "Недоступна";
-    description.classList.add("error");
-    row.append(term, description);
-    container.replaceChildren(row);
-  });
+async function refreshEnvironment() {
+  const env = await api('/api/environment?include_versions=true');
+  const container = $('environment');
+  container.innerHTML = Object.entries(env).map(([key, item]) => {
+    const ok = item.exists && (item.writable ?? true);
+    return `<div class="env-card"><strong>${escapeHtml(key)}</strong><p class="${ok ? 'ok' : 'warn'}">${ok ? 'OK' : 'Not found / Error'}</p><p>${escapeHtml(item.path || '')}</p><p>${escapeHtml(item.version || item.error || '')}</p></div>`;
+  }).join('');
 }
 
-async function loadStatus() {
-  if (!backendStatus) {
-    return;
-  }
-
-  try {
-    const data = await requestJson("/api/health");
-    backendStatus.textContent = data.status === "ok" ? "Работает" : "Неизвестно";
-    backendStatus.classList.remove("error");
-  } catch (error) {
-    backendStatus.textContent = "Недоступен";
-    backendStatus.classList.add("error");
-    console.error("Health check failed", error);
-  }
+async function requestFormats() {
+  const error = validateClient();
+  if (error && error !== 'В ручном режиме формат не выбран') { showMessage(error, 'error'); return; }
+  await saveConfig();
+  showMessage('Запрашиваем форматы...');
+  const data = await api('/api/formats', { method:'POST', body: JSON.stringify(collectFormatRequest()) });
+  state.formats = data.formats;
+  $('rawFormats').textContent = data.raw_output || '';
+  renderFormats();
+  $('commandLine').value = data.command || '';
+  if (!data.success) showMessage(data.error || 'yt-dlp -F завершился с ошибкой', 'error'); else showMessage(`Получено форматов: ${data.formats.length}`);
+  switchTab('formats');
 }
 
-async function loadEnvironment() {
-  try {
-    const data = await requestJson("/api/environment");
-    renderEnvironmentList(environmentDirectories, data.directories);
-    renderEnvironmentList(environmentTools, data.tools);
-  } catch (error) {
-    renderEnvironmentError();
-    console.error("Environment check failed", error);
-  }
+function renderFormats() {
+  $('formatsBody').innerHTML = state.formats.map((f, idx) => `<tr data-index="${idx}" class="${f.format_id === state.selectedFormat ? 'selected' : ''}"><td>${escapeHtml(f.format_id)}</td><td>${escapeHtml(f.extension)}</td><td>${escapeHtml(f.resolution)}</td><td>${escapeHtml(f.fps)}</td><td>${escapeHtml(f.video)}</td><td>${escapeHtml(f.audio)}</td><td>${escapeHtml(f.size)}</td><td>${escapeHtml(f.note)}</td><td>${escapeHtml(f.raw)}</td></tr>`).join('');
 }
 
-function parseFormatOutput(output) {
-  return output
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("[") && !line.startsWith("ID ") && !line.startsWith("---"))
-    .map((line) => {
-      const columns = line.split(/\s+/);
-      return {
-        code: columns[0] || "",
-        extension: columns[1] || "",
-        resolution: columns[2] || "",
-        note: columns.slice(3).join(" "),
-        raw: line,
-      };
-    })
-    .filter((format) => format.code && format.extension);
-}
-
-function renderFormats(formats, rawOutput) {
-  if (!formatsTableBody) {
-    return;
-  }
-
-  formatsTableBody.replaceChildren();
-  formatsRaw.textContent = rawOutput || "";
-
-  if (!formats.length) {
-    formatsMessage.textContent = "Форматы не распознаны. Проверьте raw output.";
-    return;
-  }
-
-  formatsMessage.textContent = `Найдено форматов: ${formats.length}. Нажмите строку, чтобы выбрать format code.`;
-  formats.forEach((format) => {
-    const row = document.createElement("tr");
-    row.className = "is-clickable";
-    row.dataset.formatCode = format.code;
-    row.title = format.raw;
-    if (format.code === selectedFormatCode) {
-      row.classList.add("is-selected");
-    }
-
-    [format.code, format.extension, format.resolution, format.note].forEach((value) => {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    });
-
-    row.addEventListener("click", () => selectFormat(format.code));
-    formatsTableBody.append(row);
-  });
-}
-
-function selectFormat(formatCode) {
-  selectedFormatCode = formatCode;
-  const selectedFormatInput = fieldByName("selected_format");
-  const formatMode = fieldByName("format_mode");
-  if (selectedFormatInput) {
-    selectedFormatInput.value = formatCode;
-  }
-  if (formatMode) {
-    formatMode.value = "selected";
-  }
-
-  formatsTableBody?.querySelectorAll("tr").forEach((row) => {
-    row.classList.toggle("is-selected", row.dataset.formatCode === formatCode);
-  });
-  queueSaveConfig();
-  showToast(`Выбран format code: ${formatCode}`);
-}
-
-async function loadFormats() {
-  const button = document.querySelector("#load-formats-button");
-  const refreshButton = document.querySelector("#refresh-formats-button");
-  const payload = buildRequestPayload();
-  if (!payload.url) {
-    updateUrlButtons();
-    return;
-  }
-
-  setButtonLoading(button, true, "Загрузка…");
-  setButtonLoading(refreshButton, true, "Загрузка…");
-  formatsMessage.textContent = "Запрашиваем форматы…";
-  try {
-    await saveConfig(false);
-    const data = await requestJson("/api/formats", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    renderFormats(parseFormatOutput(data.output), data.output);
-    switchTab("formats");
-  } catch (error) {
-    formatsMessage.textContent = `Ошибка: ${apiErrorMessage(error)}`;
-    showToast(`Не удалось получить форматы: ${apiErrorMessage(error)}`, "error");
-  } finally {
-    setButtonLoading(button, false);
-    setButtonLoading(refreshButton, false);
-  }
-}
-
-function renderResult(data) {
-  if (!resultCard) {
-    return;
-  }
-
-  resultCard.classList.remove("muted");
-  resultCard.replaceChildren();
-  const list = document.createElement("dl");
-  [
-    ["Status", data.status],
-    ["URL", data.url],
-    ["PID", data.pid],
-    ["Log", data.log_path],
-  ].forEach(([label, value]) => {
-    const row = document.createElement("div");
-    const term = document.createElement("dt");
-    const description = document.createElement("dd");
-    term.textContent = label;
-    description.textContent = value || "—";
-    row.append(term, description);
-    list.append(row);
-  });
-  resultCard.append(list);
+function selectFormat(formatId) {
+  state.selectedFormat = formatId;
+  $('selected_format').value = formatId;
+  $('formatFieldMirror').value = formatId;
+  setMode('manual');
+  renderFormats();
+  showMessage(`Выбран формат ${formatId}`);
 }
 
 async function startDownload() {
-  const button = document.querySelector("#start-download-button");
-  const payload = buildRequestPayload();
-  if (!payload.url) {
-    updateUrlButtons();
-    return;
-  }
-
-  setButtonLoading(button, true, "Запуск…");
-  try {
-    await saveConfig(false);
-    const data = await requestJson("/api/download", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    renderResult(data);
-    showToast("Загрузка запущена");
-    switchTab("logs");
-    startLogPolling();
-    await loadHistory();
-  } catch (error) {
-    showToast(`Не удалось запустить загрузку: ${apiErrorMessage(error)}`, "error");
-  } finally {
-    setButtonLoading(button, false);
-  }
+  const error = validateClient();
+  if (error) { showMessage(error, 'error'); return; }
+  await saveConfig();
+  const data = await api('/api/download', { method:'POST', body: JSON.stringify(collectDownloadRequest()) });
+  state.running = true;
+  $('statusBadge').textContent = 'Идёт загрузка';
+  updateControls();
+  showMessage(`Загрузка запущена: ${data.job_id}`);
+  switchTab('logs');
 }
 
 async function stopDownload() {
-  try {
-    const data = await requestJson("/api/download/stop", { method: "POST", body: "{}" });
-    showToast(data.status === "stopped" ? "Загрузка остановлена" : "Активной загрузки нет");
-    await loadLogs();
-  } catch (error) {
-    showToast(`Не удалось остановить загрузку: ${apiErrorMessage(error)}`, "error");
-  }
+  const data = await api('/api/download/stop', { method:'POST', body:'{}' });
+  showMessage(data.message, data.success ? 'ok' : 'error');
 }
 
-async function loadLogs() {
-  try {
-    const data = await requestJson("/api/logs?lines=500");
-    runningStatus.textContent = data.running ? "Да" : "Нет";
-    runningStatus.className = data.running ? "warning" : "success";
-    logPath.textContent = data.log_path ? `Log: ${data.log_path}` : "Лог пока не выбран.";
-    logsOutput.textContent = data.lines?.length ? data.lines.join("\n") : "Логи пока пусты.";
-    logsOutput.scrollTop = logsOutput.scrollHeight;
-    if (!data.running) {
-      stopLogPolling();
-    }
-    return data;
-  } catch (error) {
-    logsOutput.textContent = `Ошибка загрузки логов: ${apiErrorMessage(error)}`;
-    stopLogPolling();
-    throw error;
-  }
+async function refreshLogs() {
+  const data = await api('/api/logs');
+  state.running = Boolean(data.running);
+  $('commandLine').value = data.command || '';
+  $('logOutput').textContent = (data.logs || []).join('\n');
+  $('statusBadge').textContent = data.status || 'idle';
+  if (data.result && data.result.file) renderResult(data.result);
+  updateControls();
 }
 
-function startLogPolling() {
-  stopLogPolling();
-  loadLogs().catch((error) => console.error("Log polling failed", error));
-  logTimer = window.setInterval(() => {
-    loadLogs().catch((error) => console.error("Log polling failed", error));
-  }, 1500);
-}
-
-function stopLogPolling() {
-  if (logTimer) {
-    window.clearInterval(logTimer);
-    logTimer = null;
-  }
-}
-
-function renderHistory(items) {
-  if (!historyTableBody) {
-    return;
-  }
-
-  historyTableBody.replaceChildren();
-  if (!items.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 10;
-    cell.className = "muted";
-    cell.textContent = "История пуста.";
-    row.append(cell);
-    historyTableBody.append(row);
-    return;
-  }
-
-  items.forEach((item) => {
-    const row = document.createElement("tr");
-    const date = item.datetime ? new Date(item.datetime).toLocaleString() : "—";
-    [
-      date,
-      item.title || "—",
-      item.url,
-      item.download_dir || "—",
-      item.output_file || "—",
-      item.mode || "—",
-      item.format || "—",
-      item.status,
-      item.error || "—",
-    ].forEach((value) => {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    });
-
-    const actionsCell = document.createElement("td");
-    const repeatButton = document.createElement("button");
-    repeatButton.className = "button button--secondary button--small";
-    repeatButton.type = "button";
-    repeatButton.textContent = "Повторить";
-    repeatButton.addEventListener("click", () => repeatHistoryItem(item));
-    actionsCell.append(repeatButton);
-    row.append(actionsCell);
-
-    historyTableBody.append(row);
-  });
-}
-
-function repeatHistoryItem(item) {
-  writeFieldValue(fieldByName("last_url"), item.url || "");
-  writeFieldValue(fieldByName("download_dir"), item.download_dir || "Downloads");
-  writeFieldValue(fieldByName("output_template"), item.output_file || "%(title)s.%(ext)s");
-
-  if (item.mode) {
-    writeFieldValue(fieldByName("download_mode"), item.mode);
-  }
-
-  const formatValue = item.format || "";
-  selectedFormatCode = "";
-  if (["best", "worst"].includes(formatValue)) {
-    writeFieldValue(fieldByName("format_mode"), formatValue);
-    writeFieldValue(fieldByName("selected_format"), "");
-  } else if (item.mode === "audio" && formatValue) {
-    writeFieldValue(fieldByName("audio_format"), formatValue);
-  } else if (formatValue) {
-    writeFieldValue(fieldByName("format_mode"), "selected");
-    writeFieldValue(fieldByName("selected_format"), formatValue);
-    selectedFormatCode = formatValue;
-  }
-
-  updateUrlButtons();
-  updateDependentControls();
-  queueSaveConfig();
-  switchTab("download");
-  showToast("Параметры из истории подставлены в форму");
+function renderResult(result) {
+  state.lastResult = result;
+  $('resultInfo').innerHTML = `<dt>Файл</dt><dd>${escapeHtml(result.file || '')}</dd><dt>Папка</dt><dd>${escapeHtml(result.folder || '')}</dd><dt>Размер</dt><dd>${formatBytes(result.size || 0)}</dd><dt>Статус</dt><dd>${escapeHtml(result.status || '')}</dd>`;
+  $('openFileBtn').disabled = !result.file;
+  $('openFolderBtn').disabled = !result.folder;
+  const preview = $('preview');
+  if (result.preview_type === 'video') preview.innerHTML = `<video controls src="${escapeAttr(result.preview_url)}"></video>`;
+  else if (result.preview_type === 'audio') preview.innerHTML = `<audio controls src="${escapeAttr(result.preview_url)}"></audio>`;
+  else preview.innerHTML = '<p>Предпросмотр в браузере для этого формата может быть недоступен. Используйте кнопку “Открыть файл”.</p>';
 }
 
 async function loadHistory() {
-  try {
-    const data = await requestJson("/api/history");
-    renderHistory(data.items || []);
-  } catch (error) {
-    showToast(`Не удалось загрузить историю: ${apiErrorMessage(error)}`, "error");
-  }
+  const data = await api('/api/history');
+  $('historyBody').innerHTML = data.history.map((h, idx) => `<tr><td>${escapeHtml(h.datetime)}</td><td>${escapeHtml(h.url)}</td><td>${escapeHtml(h.output_file)}</td><td>${escapeHtml(h.mode)}</td><td>${escapeHtml(h.format)}</td><td>${escapeHtml(h.status)}</td><td><button data-repeat="${idx}">Повторить</button> <button data-open-file="${idx}">Файл</button> <button data-open-folder="${idx}">Папка</button></td></tr>`).join('');
+  $('historyBody').dataset.items = JSON.stringify(data.history);
 }
 
-async function clearHistory() {
-  try {
-    const data = await requestJson("/api/history/clear", { method: "POST", body: "{}" });
-    renderHistory([]);
-    showToast(`История очищена: ${data.deleted}`);
-  } catch (error) {
-    showToast(`Не удалось очистить историю: ${apiErrorMessage(error)}`, "error");
-  }
+function repeatHistory(item) {
+  $('url').value = item.url || '';
+  $('download_dir').value = item.download_dir || 'Downloads';
+  setMode(item.mode || 'video');
+  if (item.format && !['video','audio'].includes(item.format)) $('selected_format').value = item.format;
+  switchTab('download');
+  updateControls();
 }
 
-function bindEvents() {
-  document.querySelectorAll(".tab-button").forEach((button) => {
-    button.addEventListener("click", () => switchTab(button.dataset.tabTarget));
-  });
+async function openPath(endpoint, path) { await api(endpoint, { method:'POST', body: JSON.stringify({ path }) }); }
 
-  document.querySelectorAll("input, select").forEach((field) => {
-    field.addEventListener("input", () => {
-      if (field === urlInput) {
-        updateUrlButtons();
-      }
-      queueSaveConfig();
-    });
-    field.addEventListener("change", () => {
-      updateDependentControls();
-      queueSaveConfig();
-    });
-  });
+function escapeHtml(value) { return String(value ?? '').replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
+function escapeAttr(value) { return escapeHtml(value).replace(/'/g, '&#39;'); }
+function formatBytes(bytes) { if (!bytes) return '0 B'; const units=['B','KB','MB','GB']; let n=bytes, i=0; while(n>=1024 && i<units.length-1){n/=1024;i++;} return `${n.toFixed(i ? 1 : 0)} ${units[i]}`; }
 
-  document.querySelector("#save-config-button")?.addEventListener("click", () => {
-    saveConfig(true).catch((error) => showToast(`Не удалось сохранить: ${apiErrorMessage(error)}`, "error"));
-  });
-  document.querySelector("#load-formats-button")?.addEventListener("click", loadFormats);
-  document.querySelector("#refresh-formats-button")?.addEventListener("click", loadFormats);
-  document.querySelector("#start-download-button")?.addEventListener("click", startDownload);
-  document.querySelector("#stop-download-button")?.addEventListener("click", stopDownload);
-  document.querySelector("#refresh-logs-button")?.addEventListener("click", () => loadLogs().catch(() => undefined));
-  document.querySelector("#refresh-history-button")?.addEventListener("click", loadHistory);
-  document.querySelector("#clear-history-button")?.addEventListener("click", clearHistory);
+function setupEvents() {
+  document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+  fields.forEach(id => { const el = $(id); if (el) el.addEventListener('input', () => { if (id === 'url') { state.selectedFormat = ''; $('selected_format').value = ''; $('formatFieldMirror').value = ''; } updateControls(); }); });
+  document.querySelectorAll('input[name="download_mode"]').forEach(el => el.addEventListener('change', updateControls));
+  $('saveConfigBtn').addEventListener('click', () => saveConfig().catch(e => showMessage(e.message, 'error')));
+  $('formatsBtn').addEventListener('click', () => requestFormats().catch(e => showMessage(e.message, 'error')));
+  $('downloadBtn').addEventListener('click', () => startDownload().catch(e => showMessage(e.message, 'error')));
+  $('stopBtn').addEventListener('click', () => stopDownload().catch(e => showMessage(e.message, 'error')));
+  $('formatsBody').addEventListener('click', e => { const tr = e.target.closest('tr'); if (tr) selectFormat(state.formats[Number(tr.dataset.index)].format_id); });
+  $('formatFieldMirror').addEventListener('input', () => { $('selected_format').value = $('formatFieldMirror').value; state.selectedFormat = $('formatFieldMirror').value; updateControls(); });
+  $('useFormatBtn').addEventListener('click', () => selectFormat($('formatFieldMirror').value.trim() || state.selectedFormat));
+  $('copyCommandBtn').addEventListener('click', () => navigator.clipboard.writeText($('commandLine').value));
+  $('copyLogBtn').addEventListener('click', () => navigator.clipboard.writeText($('logOutput').textContent));
+  $('clearLogBtn').addEventListener('click', async () => { await api('/api/logs/clear', {method:'POST', body:'{}'}); await refreshLogs(); });
+  $('openFileBtn').addEventListener('click', () => state.lastResult && openPath('/api/open-file', state.lastResult.file));
+  $('openFolderBtn').addEventListener('click', () => state.lastResult && openPath('/api/open-folder', state.lastResult.folder || state.lastResult.file));
+  $('refreshEnvBtn').addEventListener('click', () => refreshEnvironment().catch(e => showMessage(e.message, 'error')));
+  document.querySelectorAll('[data-tool]').forEach(btn => btn.addEventListener('click', async () => { const data = await api('/api/tools', {method:'POST', body:JSON.stringify({action:btn.dataset.tool})}); $('toolOutput').textContent = data.output; switchTab('logs'); }));
+  $('clearHistoryBtn').addEventListener('click', async () => { await api('/api/history/clear', {method:'POST', body:'{}'}); await loadHistory(); });
+  $('historyBody').addEventListener('click', async e => { const items = JSON.parse($('historyBody').dataset.items || '[]'); const repeat = e.target.dataset.repeat; const openFile = e.target.dataset.openFile; const openFolder = e.target.dataset.openFolder; if (repeat !== undefined) repeatHistory(items[Number(repeat)]); if (openFile !== undefined) await openPath('/api/open-file', items[Number(openFile)].output_file); if (openFolder !== undefined) await openPath('/api/open-folder', items[Number(openFolder)].output_file || items[Number(openFolder)].download_dir); });
+}
+
+function setupSse() {
+  const source = new EventSource('/api/events');
+  source.onmessage = async (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'log') $('logOutput').textContent += `${$('logOutput').textContent ? '\n' : ''}[${data.datetime}] ${data.message}`;
+    if (data.type === 'result' && data.result) renderResult(data.result);
+    if (data.type === 'status') { await refreshLogs(); await loadHistory(); }
+  };
+  source.onerror = () => setTimeout(refreshLogs, 1500);
 }
 
 async function init() {
-  bindEvents();
-  updateUrlButtons();
-  updateDependentControls();
-  await Promise.allSettled([loadStatus(), loadEnvironment(), loadConfig(), loadHistory(), loadLogs()]);
+  setupEvents();
+  await loadConfig();
+  await loadImpersonateTargets();
+  await refreshEnvironment();
+  await refreshLogs();
+  await loadHistory();
+  setupSse();
+  setInterval(refreshLogs, 4000);
 }
 
-init();
+init().catch(error => showMessage(error.message, 'error'));
