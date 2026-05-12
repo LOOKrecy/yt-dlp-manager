@@ -8,19 +8,16 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 from app.models import AppConfig
 from app.path_utils import DATA_DIR, DOWNLOADS_DIR, LOGS_DIR
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "last_url": "",
-    "download_dir": "downloads",
+    "download_dir": "Downloads",
     "proxy_enabled": False,
     "proxy_url": "",
     "cookies_enabled": False,
@@ -94,6 +91,7 @@ def save_config(config: dict[str, Any]) -> dict[str, Any]:
         config_file.write("\n")
 
     return normalized_config
+
 
 def get_config() -> AppConfig:
     """Return the default local-only application configuration."""

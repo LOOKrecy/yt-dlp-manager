@@ -13,7 +13,15 @@ class ProcessManager:
 
     def __init__(self) -> None:
         self._process: subprocess.Popen[str] | None = None
+        self._log_path: Path | None = None
         self._lock = threading.RLock()
+
+    @property
+    def current_log_path(self) -> Path | None:
+        """Return the active process log path, if one is known."""
+
+        with self._lock:
+            return self._log_path
 
     @property
     def running(self) -> bool:
@@ -50,6 +58,7 @@ class ProcessManager:
                 raise
 
             self._process = process
+            self._log_path = log_path
 
         stdout_thread = self._start_stream_reader(process.stdout, log_file, "stdout")
         stderr_thread = self._start_stream_reader(process.stderr, log_file, "stderr")
@@ -63,6 +72,7 @@ class ProcessManager:
             process = self._process
             if process is None or process.poll() is not None:
                 self._process = None
+                self._log_path = None
                 return False
 
             process.terminate()
@@ -122,6 +132,7 @@ class ProcessManager:
         with self._lock:
             if self._process is process:
                 self._process = None
+                self._log_path = None
 
         log_file.close()
 
