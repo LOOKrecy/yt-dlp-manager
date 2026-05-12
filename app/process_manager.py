@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import uuid
+from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -141,7 +142,7 @@ class ProcessManager:
             "size": size,
             "status": status,
             "preview_type": preview_type,
-            "preview_url": f"/api/media?path={output_file}" if output_file else "",
+            "preview_url": f"/api/media?path={quote(output_file)}" if output_file else "",
         }
 
     def _write_history(self, request: DownloadRequest, status: str, output_file: str, error: str) -> None:

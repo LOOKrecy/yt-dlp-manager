@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { config: {}, formats: [], selectedFormat: '', lastResult: null, running: false };
+const state = { config: {}, formats: [], selectedFormat: '', lastResult: null, renderedPreviewKey: '', running: false };
 
 const fields = ['url','download_dir','filename_template','proxy_enabled','proxy','cookies_enabled','cookies_file','section_enabled','section_start','section_end','impersonate_enabled','impersonate_target','audio_format','selected_format','extra_args'];
 
@@ -175,9 +175,14 @@ function renderResult(result) {
   $('resultInfo').innerHTML = `<dt>Файл</dt><dd>${escapeHtml(result.file || '')}</dd><dt>Папка</dt><dd>${escapeHtml(result.folder || '')}</dd><dt>Размер</dt><dd>${formatBytes(result.size || 0)}</dd><dt>Статус</dt><dd>${escapeHtml(result.status || '')}</dd>`;
   $('openFileBtn').disabled = !result.file;
   $('openFolderBtn').disabled = !result.folder;
+
+  const previewKey = `${result.preview_type || 'none'}|${result.preview_url || ''}`;
+  if (previewKey === state.renderedPreviewKey) return;
+  state.renderedPreviewKey = previewKey;
+
   const preview = $('preview');
-  if (result.preview_type === 'video') preview.innerHTML = `<video controls src="${escapeAttr(result.preview_url)}"></video>`;
-  else if (result.preview_type === 'audio') preview.innerHTML = `<audio controls src="${escapeAttr(result.preview_url)}"></audio>`;
+  if (result.preview_type === 'video') preview.innerHTML = `<video controls preload="metadata" src="${escapeAttr(result.preview_url)}"></video>`;
+  else if (result.preview_type === 'audio') preview.innerHTML = `<audio controls preload="metadata" src="${escapeAttr(result.preview_url)}"></audio>`;
   else preview.innerHTML = '<p>Предпросмотр в браузере для этого формата может быть недоступен. Используйте кнопку “Открыть файл”.</p>';
 }
 
