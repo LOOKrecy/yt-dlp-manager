@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.models import DownloadRequest
+from app.models import DownloadRequest, FormatResponse
 from app.path_utils import DOWNLOADS_DIR, LOGS_DIR, REQUIRED_TOOLS, ROOT_DIR
 from app.process_manager import ProcessManager
 
@@ -19,7 +20,7 @@ class YtDlpService:
         self._process_manager = process_manager
         self._executable = REQUIRED_TOOLS["yt-dlp"]
 
-    def prepare_download(self, request: DownloadRequest) -> dict[str, str]:
+    def prepare_download(self, request: DownloadRequest) -> dict[str, str | int]:
         """Validate, build, and start a yt-dlp download command."""
 
         command = self.build_download_command(request)
@@ -29,9 +30,31 @@ class YtDlpService:
         return {
             "status": "started",
             "url": self._value(request, "url"),
-            "pid": str(pid),
+            "pid": pid,
             "log_path": str(log_path),
         }
+
+    def list_formats(self, request: DownloadRequest) -> FormatResponse:
+        """Run yt-dlp in format-listing mode and return the raw output."""
+
+        command = self.build_format_request_command(request)
+        completed_process = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            shell=False,
+            text=True,
+        )
+        output = "".join(
+            part
+            for part in (completed_process.stdout, completed_process.stderr)
+            if part
+        ).strip()
+
+        if completed_process.returncode != 0:
+            raise RuntimeError(output or "yt-dlp format lookup failed")
+
+        return FormatResponse(command=command, output=output)
 
     def stop_download(self) -> dict[str, str]:
         """Stop the active download process."""
