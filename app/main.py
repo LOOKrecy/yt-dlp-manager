@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config_manager import load_config, save_config
@@ -22,8 +22,35 @@ event_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=500)
 manager.set_event_queue(event_queue)
 
 
+def _is_windows_client_disconnect(context: dict) -> bool:
+    exc = context.get("exception")
+    if not isinstance(exc, ConnectionResetError) or getattr(exc, "winerror", None) != 10054:
+        return False
+    text = f"{context.get('message', '')} {context.get('handle', '')}"
+    return "_ProactorBasePipeTransport._call_connection_lost" in text
+
+
+def _install_client_disconnect_exception_filter(loop: asyncio.AbstractEventLoop) -> None:
+    if getattr(loop, "_yt_dlp_manager_disconnect_filter_installed", False):
+        return
+
+    previous_handler = loop.get_exception_handler()
+
+    def handler(current_loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        if _is_windows_client_disconnect(context):
+            return
+        if previous_handler is not None:
+            previous_handler(current_loop, context)
+            return
+        current_loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+    setattr(loop, "_yt_dlp_manager_disconnect_filter_installed", True)
+
+
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
+    _install_client_disconnect_exception_filter(asyncio.get_running_loop())
     load_config()
     environment_status(include_versions=False)
 
@@ -174,6 +201,11 @@ def media(path: str = Query(...)) -> FileResponse:
     if not resolved.exists() or not resolved.is_file():
         raise HTTPException(status_code=404, detail="Файл не найден")
     return FileResponse(resolved)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    return Response(status_code=204)
 
 
 @app.post("/api/tools")
