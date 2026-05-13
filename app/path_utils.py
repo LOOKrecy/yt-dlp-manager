@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ HISTORY_PATH = DATA_DIR / "history.json"
 YT_DLP_PATH = BIN_DIR / "yt-dlp.exe"
 FFMPEG_PATH = BIN_DIR / "ffmpeg.exe"
 FFPROBE_PATH = BIN_DIR / "ffprobe.exe"
+DENO_PATH = BIN_DIR / "deno.exe"
 
 WINDOWS_FORBIDDEN_CHARS = r'<>:"/\\|?*'
 RESERVED_WINDOWS_NAMES = {
@@ -80,6 +82,13 @@ def build_output_template(download_dir: Path, filename_template: str) -> str:
     return str(download_dir / "%(title)s.%(ext)s")
 
 
+def find_deno_path() -> Path | None:
+    if DENO_PATH.exists():
+        return DENO_PATH
+    deno = shutil.which("deno")
+    return Path(deno) if deno else None
+
+
 def check_tool_version(path: Path, args: list[str], timeout: float = 4.0) -> str:
     if not path.exists():
         return ""
@@ -113,6 +122,13 @@ def environment_status(include_versions: bool = False) -> dict[str, Any]:
             "path": display_path(path),
             "version": check_tool_version(path, version_args) if include_versions else "",
         }
+    deno_path = find_deno_path()
+    result["deno"] = {
+        "exists": deno_path is not None,
+        "path": display_path(deno_path) if deno_path else display_path(DENO_PATH),
+        "version": check_tool_version(deno_path, ["--version"]) if include_versions and deno_path else "",
+        "optional": True,
+    }
     try:
         ensure_writable_directory("Downloads")
         downloads_ok = True

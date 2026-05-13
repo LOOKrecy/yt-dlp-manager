@@ -11,10 +11,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config_manager import load_config, save_config
 from app.history_manager import clear_history, load_history
-from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathRequest, ToolActionRequest
-from app.path_utils import FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, open_with_system, resolve_user_path
+from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathRequest, OutputConflictRequest, ToolActionRequest
+from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path
 from app.process_manager import ProcessManager
-from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, parse_formats, quote_command
+from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats, quote_command, suggest_non_conflicting_filename, template_name_from_path
 
 app = FastAPI(title="Local yt-dlp Manager")
 manager = ProcessManager()
@@ -46,6 +46,27 @@ def _install_client_disconnect_exception_filter(loop: asyncio.AbstractEventLoop)
 
     loop.set_exception_handler(handler)
     setattr(loop, "_yt_dlp_manager_disconnect_filter_installed", True)
+
+
+def _probe_output_path(request: DownloadRequest) -> tuple[Path | None, str, str]:
+    command = build_output_probe_command(request)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        shell=False,
+    )
+    raw_output = (completed.stdout or "") + (completed.stderr or "")
+    if completed.returncode != 0:
+        return None, raw_output, quote_command(command)
+    for line in completed.stdout.splitlines():
+        text = line.strip()
+        if text:
+            return Path(text), raw_output, quote_command(command)
+    return None, raw_output, quote_command(command)
 
 
 @app.on_event("startup")
@@ -125,13 +146,60 @@ def get_formats(request: FormatRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/output-conflict")
+def output_conflict(request: OutputConflictRequest) -> dict:
+    try:
+        path, raw_output, command = _probe_output_path(request)
+        if path is None:
+            return {
+                "success": False,
+                "exists": False,
+                "path": "",
+                "suggested_path": "",
+                "suggested_template": "",
+                "raw_output": raw_output,
+                "command": command,
+                "error": "Не удалось определить имя будущего файла",
+            }
+        suggested = suggest_non_conflicting_filename(path)
+        return {
+            "success": True,
+            "exists": path.exists(),
+            "path": str(path),
+            "suggested_path": str(suggested),
+            "suggested_template": template_name_from_path(suggested),
+            "raw_output": raw_output,
+            "command": command,
+            "error": "",
+        }
+    except ValueError as exc:
+        manager.emit("log", f"Ошибка проверки имени файла: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/download")
 def start_download(request: DownloadRequest) -> dict:
     try:
-        config = AppConfig(**request.model_dump(exclude={"url", "last_url"}), last_url=request.url)
+        if request.conflict_policy in {"ask", "rename"}:
+            path, raw_output, command = _probe_output_path(request)
+            if path is not None and path.exists():
+                suggested = suggest_non_conflicting_filename(path)
+                suggested_template = template_name_from_path(suggested)
+                if request.conflict_policy == "ask":
+                    return {
+                        "success": False,
+                        "conflict": True,
+                        "path": str(path),
+                        "suggested_path": str(suggested),
+                        "suggested_template": suggested_template,
+                        "raw_output": raw_output,
+                        "command": command,
+                    }
+                request.filename_template = suggested_template
+        config = AppConfig(**request.model_dump(exclude={"url", "last_url", "conflict_policy"}), last_url=request.url)
         save_config(config)
         job_id = manager.start_download(request)
-        return {"success": True, "job_id": job_id}
+        return {"success": True, "job_id": job_id, "conflict": False}
     except ValueError as exc:
         manager.emit("log", f"Ошибка запуска загрузки: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -214,6 +282,9 @@ def tool_action(request: ToolActionRequest) -> dict:
         command = [str(YT_DLP_PATH), "--version"]
     elif request.action == "ffmpeg-version":
         command = [str(FFMPEG_PATH), "-version"]
+    elif request.action == "deno-version":
+        deno_path = find_deno_path() or DENO_PATH
+        command = [str(deno_path), "--version"]
     else:
         command = [str(YT_DLP_PATH), "-U"]
     if not Path(command[0]).exists():

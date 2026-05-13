@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 DownloadMode = Literal["video", "audio", "manual"]
 AudioFormat = Literal["m4a", "mp3", "opus", "wav"]
 FormatMode = Literal["auto", "manual"]
+ConflictPolicy = Literal["ask", "rename", "overwrite"]
 
 
 class AppConfig(BaseModel):
@@ -42,6 +43,11 @@ class FormatRequest(BaseModel):
 
 class DownloadRequest(AppConfig):
     url: str = Field(default="")
+    conflict_policy: ConflictPolicy = "ask"
+
+
+class OutputConflictRequest(DownloadRequest):
+    pass
 
 
 class FormatItem(BaseModel):
@@ -74,4 +80,4 @@ class OpenPathRequest(BaseModel):
 
 
 class ToolActionRequest(BaseModel):
-    action: Literal["yt-dlp-version", "ffmpeg-version", "yt-dlp-update"]
+    action: Literal["yt-dlp-version", "ffmpeg-version", "deno-version", "yt-dlp-update"]

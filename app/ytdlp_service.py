@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 from app.models import DownloadRequest, FormatItem, FormatRequest
-from app.path_utils import FFMPEG_PATH, YT_DLP_PATH, build_output_template, ensure_writable_directory, resolve_user_path
+from app.path_utils import FFMPEG_PATH, YT_DLP_PATH, build_output_template, ensure_writable_directory, find_deno_path, resolve_user_path
 
 FALLBACK_IMPERSONATE_TARGETS = ["chrome", "chrome-110", "chrome-120", "edge", "safari", "firefox"]
 
@@ -45,6 +45,54 @@ def add_access_args(args: list[str], request: FormatRequest | DownloadRequest) -
         args.extend(["--impersonate", request.impersonate_target.strip()])
 
 
+def add_deno_runtime_arg(args: list[str]) -> None:
+    deno_path = find_deno_path()
+    if deno_path is not None:
+        args.extend(["--js-runtimes", f"deno:{deno_path}"])
+
+
+def add_download_mode_args(args: list[str], request: DownloadRequest) -> None:
+    if request.download_mode == "video":
+        args.extend(["-f", "bestvideo+bestaudio/best"])
+    elif request.download_mode == "audio":
+        args.extend(["-x", "--audio-format", request.audio_format])
+    else:
+        args.extend(["-f", request.selected_format.strip()])
+
+
+def add_section_args(args: list[str], request: DownloadRequest) -> None:
+    if request.section_enabled:
+        args.extend(["--download-sections", f"*{request.section_start}-{request.section_end}"])
+
+
+def build_output_probe_command(request: DownloadRequest) -> list[str]:
+    validate_download_request(request)
+    download_dir = ensure_writable_directory(request.download_dir)
+    args = [str(YT_DLP_PATH), "--skip-download", "--print", "filename"]
+    add_deno_runtime_arg(args)
+    add_access_args(args, request)
+    add_download_mode_args(args, request)
+    add_section_args(args, request)
+    args.extend(["-o", build_output_template(download_dir, request.filename_template)])
+    args.extend(split_extra_args(request.extra_args))
+    args.append(request.url.strip())
+    return args
+
+
+def suggest_non_conflicting_filename(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{path.stem} ({index}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise ValueError("Не удалось подобрать свободное имя файла")
+
+
+def template_name_from_path(path: Path) -> str:
+    return path.stem
+
+
 def parse_time(value: str) -> int:
     parts = (value or "").strip().split(":")
     if len(parts) != 3:
@@ -79,6 +127,7 @@ def build_format_command(request: FormatRequest) -> list[str]:
     if not YT_DLP_PATH.exists():
         raise ValueError("yt-dlp.exe не найден в папке bin")
     args = [str(YT_DLP_PATH), "-F"]
+    add_deno_runtime_arg(args)
     add_access_args(args, request)
     args.extend(split_extra_args(request.extra_args))
     args.append(request.url.strip())
@@ -88,17 +137,13 @@ def build_format_command(request: FormatRequest) -> list[str]:
 def build_download_command(request: DownloadRequest) -> list[str]:
     validate_download_request(request)
     args = [str(YT_DLP_PATH)]
+    add_deno_runtime_arg(args)
     add_access_args(args, request)
+    add_download_mode_args(args, request)
+    add_section_args(args, request)
 
-    if request.download_mode == "video":
-        args.extend(["-f", "bestvideo+bestaudio/best"])
-    elif request.download_mode == "audio":
-        args.extend(["-x", "--audio-format", request.audio_format])
-    else:
-        args.extend(["-f", request.selected_format.strip()])
-
-    if request.section_enabled:
-        args.extend(["--download-sections", f"*{request.section_start}-{request.section_end}"])
+    if request.conflict_policy == "overwrite":
+        args.append("--force-overwrites")
 
     download_dir = ensure_writable_directory(request.download_dir)
     args.extend(["-o", build_output_template(download_dir, request.filename_template)])

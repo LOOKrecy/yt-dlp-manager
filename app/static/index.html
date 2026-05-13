@@ -7,6 +7,13 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite">
+    <div id="toastText"></div>
+    <button id="toastResultBtn" class="toast-action hidden" type="button">Показать результат</button>
+    <button id="toastClose" class="toast-close" type="button" aria-label="Закрыть сообщение">×</button>
+  </div>
+  <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
+
   <header class="app-header">
     <div>
       <h1>Local yt-dlp Manager</h1>
@@ -17,7 +24,6 @@
 
   <nav class="tabs" aria-label="Разделы">
     <button class="tab active" data-tab="download">Загрузка</button>
-    <button class="tab" data-tab="formats">Форматы</button>
     <button class="tab" data-tab="logs">Логи</button>
     <button class="tab" data-tab="result">Результат</button>
     <button class="tab" data-tab="history">История</button>
@@ -26,35 +32,34 @@
 
   <main>
     <section id="download" class="panel active">
-      <div id="message" class="message hidden"></div>
       <div class="card">
-        <label>URL <span class="required">*</span>
+        <label>URL <span class="required">*</span> <button type="button" class="help" data-help="Ссылка на видео, плейлист или другой ресурс, который поддерживает yt-dlp.">?</button>
           <input id="url" type="url" placeholder="https://example.com/video" required>
         </label>
       </div>
 
       <div class="grid two">
         <div class="card">
-          <h2>Режим загрузки</h2>
+          <h2>Режим загрузки <button type="button" class="help" data-help="Выберите готовый режим или ручной код формата из окна доступных форматов.">?</button></h2>
           <label><input type="radio" name="download_mode" value="video" checked> Видео, лучшее качество</label>
           <label><input type="radio" name="download_mode" value="audio"> Только аудио</label>
           <label><input type="radio" name="download_mode" value="manual"> Пользовательский формат</label>
-          <label>Аудиоформат
+          <label>Аудиоформат <button type="button" class="help" data-help="Формат аудио при режиме Только аудио. Для конвертации нужен ffmpeg.exe.">?</button>
             <select id="audio_format">
               <option>m4a</option><option>mp3</option><option>opus</option><option>wav</option>
             </select>
           </label>
-          <label>Формат для -f
+          <label>Формат для -f <button type="button" class="help" data-help="Код формата yt-dlp, например 137+140. Можно выбрать через кнопку Запросить форматы.">?</button>
             <input id="selected_format" type="text" placeholder="137+140 или bestvideo+bestaudio/best">
           </label>
         </div>
 
         <div class="card">
-          <h2>Файл результата</h2>
-          <label>Папка сохранения
+          <h2>Файл результата <button type="button" class="help" data-help="Параметры папки и имени файла, в который будет сохранён результат.">?</button></h2>
+          <label>Папка сохранения <button type="button" class="help" data-help="Путь к папке загрузки. Относительный путь считается от папки проекта.">?</button>
             <input id="download_dir" type="text" placeholder="Downloads">
           </label>
-          <label>Имя файла (необязательно)
+          <label>Имя файла (необязательно) <button type="button" class="help" data-help="Если оставить пустым, yt-dlp возьмёт название ролика. Недопустимые символы Windows будут заменены.">?</button>
             <input id="filename_template" type="text" placeholder="my_video">
           </label>
         </div>
@@ -62,12 +67,12 @@
 
       <div class="grid two">
         <div class="card">
-          <h2>Доступ</h2>
-          <label><input id="proxy_enabled" type="checkbox"> Использовать proxy</label>
+          <h2>Доступ <button type="button" class="help" data-help="Настройки сети и авторизации для сайтов, где нужен proxy, cookies или browser impersonation.">?</button></h2>
+          <label><input id="proxy_enabled" type="checkbox"> Использовать proxy <button type="button" class="help" data-help="Включает передачу --proxy в yt-dlp. Например socks5://127.0.0.1:1080.">?</button></label>
           <input id="proxy" type="text" placeholder="socks5://127.0.0.1:1080" disabled>
-          <label><input id="cookies_enabled" type="checkbox"> Использовать cookies-файл</label>
+          <label><input id="cookies_enabled" type="checkbox"> Использовать cookies-файл <button type="button" class="help" data-help="Передаёт файл cookies в yt-dlp для доступа к аккаунту или приватному контенту.">?</button></label>
           <input id="cookies_file" type="text" placeholder="C:\path\cookies.txt" disabled>
-          <label><input id="impersonate_enabled" type="checkbox"> Impersonate</label>
+          <label><input id="impersonate_enabled" type="checkbox"> Impersonate <button type="button" class="help" data-help="Просит yt-dlp имитировать браузер. Полезно для сайтов с защитой от ботов.">?</button></label>
           <select id="impersonate_target" disabled>
             <option value="">Выберите target</option>
             <option>chrome</option><option>chrome-110</option><option>chrome-120</option><option>edge</option><option>safari</option><option>firefox</option>
@@ -75,13 +80,13 @@
         </div>
 
         <div class="card">
-          <h2>Фрагмент</h2>
+          <h2>Фрагмент <button type="button" class="help" data-help="Скачивает только часть видео. Для нарезки нужен ffmpeg.exe.">?</button></h2>
           <label><input id="section_enabled" type="checkbox"> Скачать только фрагмент</label>
           <div class="grid two compact">
             <label>Начало <input id="section_start" type="text" value="00:00:00" placeholder="HH:MM:SS" disabled></label>
             <label>Конец <input id="section_end" type="text" value="00:00:00" placeholder="HH:MM:SS" disabled></label>
           </div>
-          <label>Дополнительные параметры
+          <label>Дополнительные параметры <button type="button" class="help" data-help="Дополнительные аргументы yt-dlp. Они разбираются безопасно как список, без shell=True.">?</button>
             <input id="extra_args" type="text" placeholder="--write-thumbnail --no-playlist">
           </label>
         </div>
@@ -89,31 +94,16 @@
 
       <div class="actions sticky-actions">
         <button id="saveConfigBtn">Сохранить настройки</button>
-        <button id="formatsBtn" class="primary" disabled>Запросить форматы</button>
+        <button id="formatsBtn" class="primary" disabled>Запросить форматы <span class="help-inline" title="Откроет всплывающее окно со списком форматов">?</span></button>
         <button id="downloadBtn" class="primary" disabled>Скачать</button>
         <button id="stopBtn" class="danger" disabled>Остановить</button>
-      </div>
-    </section>
-
-    <section id="formats" class="panel">
-      <div class="card">
-        <h2>Форматы</h2>
-        <p>Кликните строку, чтобы выбрать format code. Поле можно редактировать вручную для комбинированных форматов.</p>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Код</th><th>Расширение</th><th>Разрешение</th><th>FPS</th><th>Видео</th><th>Аудио</th><th>Размер</th><th>Примечание</th><th>Исходная строка</th></tr></thead>
-            <tbody id="formatsBody"></tbody>
-          </table>
-        </div>
-        <label>Выбранный формат для -f <input id="formatFieldMirror" type="text"></label>
-        <button id="useFormatBtn">Использовать выбранный формат</button>
-        <pre id="rawFormats" class="raw-output"></pre>
+        <button id="showResultBtn" disabled>Показать результат</button>
       </div>
     </section>
 
     <section id="logs" class="panel">
       <div class="card">
-        <h2>Логи</h2>
+        <h2>Логи <button type="button" class="help" data-help="Поток сообщений yt-dlp и backend. Блок ограничен по высоте и прокручивается внутри.">?</button></h2>
         <label>Итоговая команда <input id="commandLine" readonly></label>
         <div class="actions">
           <button id="copyCommandBtn">Копировать команду</button>
@@ -126,19 +116,20 @@
 
     <section id="result" class="panel">
       <div class="card">
-        <h2>Результат</h2>
+        <h2>Результат <button type="button" class="help" data-help="Краткая информация о последнем скачанном файле. Предпросмотр открывается поверх страницы.">?</button></h2>
         <dl id="resultInfo" class="result-info"></dl>
         <div class="actions">
           <button id="openFileBtn" disabled>Открыть файл</button>
           <button id="openFolderBtn" disabled>Открыть папку</button>
+          <button id="previewResultBtn" disabled>Предпросмотр</button>
         </div>
-        <div id="preview"></div>
+        <p id="previewHint">Предпросмотр откроется во всплывающем окне и запомнит громкость.</p>
       </div>
     </section>
 
     <section id="history" class="panel">
       <div class="card">
-        <h2>История</h2>
+        <h2>История <button type="button" class="help" data-help="Список последних загрузок, сохранённых в data/history.json.">?</button></h2>
         <button id="clearHistoryBtn" class="danger">Очистить историю</button>
         <div class="table-wrap">
           <table>
@@ -151,7 +142,7 @@
 
     <section id="settings" class="panel">
       <div class="card">
-        <h2>Окружение</h2>
+        <h2>Окружение <button type="button" class="help" data-help="Проверяет наличие yt-dlp.exe, ffmpeg.exe, ffprobe.exe, deno.exe, папок данных, логов и загрузок.">?</button></h2>
         <button id="refreshEnvBtn">Обновить статус</button>
         <div id="environment" class="env-grid"></div>
       </div>
@@ -160,12 +151,71 @@
         <div class="actions">
           <button data-tool="yt-dlp-version">Проверить версию yt-dlp</button>
           <button data-tool="ffmpeg-version">Проверить версию ffmpeg</button>
+          <button data-tool="deno-version">Проверить версию Deno</button>
           <button data-tool="yt-dlp-update">Обновить yt-dlp</button>
         </div>
         <pre id="toolOutput" class="raw-output"></pre>
       </div>
     </section>
   </main>
+
+  <div id="formatsModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="formatsTitle">
+    <div class="modal-backdrop" data-close-modal="formatsModal"></div>
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <h2 id="formatsTitle">Доступные форматы</h2>
+        <button id="closeFormatsModal" type="button" class="icon-btn" aria-label="Закрыть">×</button>
+      </div>
+      <div id="formatsLoading" class="loading"><div class="spinner"></div><p>Запрашиваю доступные форматы…</p></div>
+      <div id="formatsContent" class="hidden">
+        <p>Кликните строку, чтобы выбрать format code. Поле можно редактировать вручную для комбинированных форматов.</p>
+        <div class="table-wrap formats-table-wrap">
+          <table>
+            <thead><tr><th>Код</th><th>Расширение</th><th>Разрешение</th><th>FPS</th><th>Видео</th><th>Аудио</th><th>Размер</th><th>Примечание</th><th>Исходная строка</th></tr></thead>
+            <tbody id="formatsBody"></tbody>
+          </table>
+        </div>
+        <label>Выбранный формат для -f <input id="formatFieldMirror" type="text"></label>
+        <div class="actions">
+          <button id="useFormatBtn" class="primary">Использовать выбранный формат</button>
+        </div>
+        <pre id="rawFormats" class="raw-output"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div id="resultModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="resultModalTitle">
+    <div class="modal-backdrop" data-close-modal="resultModal"></div>
+    <div class="modal-card modal-preview">
+      <div class="modal-header">
+        <h2 id="resultModalTitle">Предпросмотр результата</h2>
+        <button id="closeResultModal" type="button" class="icon-btn" aria-label="Закрыть">×</button>
+      </div>
+      <dl id="resultModalInfo" class="result-info"></dl>
+      <div id="resultModalPreview"></div>
+      <div class="actions">
+        <button id="modalOpenFileBtn">Открыть файл</button>
+        <button id="modalOpenFolderBtn">Открыть папку</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="conflictModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="conflictTitle">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="conflictTitle">Файл уже существует</h2>
+      </div>
+      <p>В папке сохранения уже есть файл:</p>
+      <p id="conflictPath" class="path-text"></p>
+      <p>Выберите действие для новой загрузки.</p>
+      <div class="actions">
+        <button id="conflictRenameBtn" class="primary">Переименовать новый файл</button>
+        <button id="conflictOverwriteBtn" class="danger">Перезаписать старый</button>
+        <button id="conflictCancelBtn">Отмена</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>
