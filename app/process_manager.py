@@ -14,12 +14,13 @@ from typing import Any
 from app.history_manager import add_history
 from app.models import DownloadRequest, HistoryEntry
 from app.path_utils import LOGS_DIR, display_path, ensure_project_dirs
+from app.text_utils import decode_process_output
 from app.ytdlp_service import build_download_command, find_result_file_from_logs, quote_command
 
 
 class ProcessManager:
     def __init__(self) -> None:
-        self.process: subprocess.Popen[str] | None = None
+        self.process: subprocess.Popen[bytes] | None = None
         self.current_job_id = ""
         self.current_request: DownloadRequest | None = None
         self.log_lines: list[str] = []
@@ -90,16 +91,13 @@ class ProcessManager:
                 command_args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
+                bufsize=0,
                 shell=False,
                 creationflags=creationflags,
             )
             assert self.process.stdout is not None
             for line in self.process.stdout:
-                text = line.rstrip("\r\n")
+                text = decode_process_output(line).rstrip("\r\n")
                 captured_output.append(text)
                 self.emit("log", text)
             return_code = self.process.wait()

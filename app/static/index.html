@@ -40,18 +40,20 @@
 
       <div class="grid two">
         <div class="card">
-          <h2>Режим загрузки <button type="button" class="help" data-help="Выберите готовый режим или ручной код формата из окна доступных форматов.">?</button></h2>
-          <label><input type="radio" name="download_mode" value="video" checked> Видео, лучшее качество</label>
+          <h2>Режим загрузки <button type="button" class="help" data-help="Выберите готовый режим или ручной код формата. В пользовательском режиме можно мышью выбрать отдельно видео и аудио для объединения через +.">?</button></h2>
+          <label><input type="radio" name="download_mode" value="video" checked> Лучшее качество видео+аудио</label>
+          <label><input type="radio" name="download_mode" value="video_only"> Только видео</label>
           <label><input type="radio" name="download_mode" value="audio"> Только аудио</label>
-          <label><input type="radio" name="download_mode" value="manual"> Пользовательский формат</label>
+          <label><input type="radio" name="download_mode" value="manual"> Пользовательский выбор</label>
           <label>Аудиоформат <button type="button" class="help" data-help="Формат аудио при режиме Только аудио. Для конвертации нужен ffmpeg.exe.">?</button>
             <select id="audio_format">
               <option>m4a</option><option>mp3</option><option>opus</option><option>wav</option>
             </select>
           </label>
-          <label>Формат для -f <button type="button" class="help" data-help="Код формата yt-dlp, например 137+140. Можно выбрать через кнопку Запросить форматы.">?</button>
+          <label>Формат для -f <button type="button" class="help" data-help="Код формата yt-dlp, например 137+140. В окне форматов выберите видео и при необходимости аудио — приложение само составит выражение с +.">?</button>
             <input id="selected_format" type="text" placeholder="137+140 или bestvideo+bestaudio/best">
           </label>
+          <button id="chooseCachedFormatsBtn" type="button">Выбрать из полученного списка</button>
         </div>
 
         <div class="card">
@@ -77,6 +79,7 @@
             <option value="">Выберите target</option>
             <option>chrome</option><option>chrome-110</option><option>chrome-120</option><option>edge</option><option>safari</option><option>firefox</option>
           </select>
+          <label><input id="deno_enabled" type="checkbox"> Использовать Deno <button type="button" class="help" data-help="Передаёт Deno в yt-dlp как JavaScript runtime. Включайте только если сайт требует выполнение JavaScript или yt-dlp прямо просит Deno.">?</button></label>
         </div>
 
         <div class="card">
@@ -168,14 +171,18 @@
       </div>
       <div id="formatsLoading" class="loading"><div class="spinner"></div><p>Запрашиваю доступные форматы…</p></div>
       <div id="formatsContent" class="hidden">
-        <p>Кликните строку, чтобы выбрать format code. Поле можно редактировать вручную для комбинированных форматов.</p>
+        <p>Выберите мышью готовый формат или отдельно дорожки: кнопка «Видео» задаёт 1.4.1, кнопка «Аудио» задаёт 1.4.2. Если аудио не выбрано, будет использован только выбранный видео/готовый формат.</p>
+        <div class="format-picker-summary">
+          <div><strong>Видео/готовый:</strong> <span id="pickedVideoFormat">—</span></div>
+          <div><strong>Аудио:</strong> <span id="pickedAudioFormat">—</span></div>
+        </div>
         <div class="table-wrap formats-table-wrap">
           <table>
-            <thead><tr><th>Код</th><th>Расширение</th><th>Разрешение</th><th>FPS</th><th>Видео</th><th>Аудио</th><th>Размер</th><th>Примечание</th><th>Исходная строка</th></tr></thead>
+            <thead><tr><th>Выбор</th><th>Код</th><th>Расширение</th><th>Разрешение</th><th>FPS</th><th>Видео</th><th>Аудио</th><th>Размер</th><th>Примечание</th><th>Исходная строка</th></tr></thead>
             <tbody id="formatsBody"></tbody>
           </table>
         </div>
-        <label>Выбранный формат для -f <input id="formatFieldMirror" type="text"></label>
+        <label>Итоговый формат для -f <input id="formatFieldMirror" type="text"></label>
         <div class="actions">
           <button id="useFormatBtn" class="primary">Использовать выбранный формат</button>
         </div>
