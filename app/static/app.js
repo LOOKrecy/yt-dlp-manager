@@ -1,10 +1,10 @@
 const $ = (id) => document.getElementById(id);
 const state = {
-  config: {}, formats: [], selectedFormat: '', tempFormat: '', lastResult: null,
+  config: {}, formats: [], formatsCache: new Map(), selectedFormat: '', tempFormat: '', tempVideoFormat: '', tempAudioFormat: '', lastResult: null,
   renderedPreviewKey: '', running: false, conflict: null, tooltipTimer: null, pinnedTooltip: false,
 };
 
-const fields = ['url','download_dir','filename_template','proxy_enabled','proxy','cookies_enabled','cookies_file','section_enabled','section_start','section_end','impersonate_enabled','impersonate_target','audio_format','selected_format','extra_args'];
+const fields = ['url','download_dir','filename_template','proxy_enabled','proxy','cookies_enabled','cookies_file','section_enabled','section_start','section_end','impersonate_enabled','impersonate_target','deno_enabled','audio_format','selected_format','extra_args'];
 
 function showMessage(text, type='ok', options={}) {
   const toast = $('toast');
@@ -37,6 +37,7 @@ function collectConfig() {
     section_end: $('section_end').value.trim() || '00:00:00',
     impersonate_enabled: $('impersonate_enabled').checked,
     impersonate_target: $('impersonate_target').value,
+    deno_enabled: $('deno_enabled').checked,
     download_mode: getMode(),
     audio_format: $('audio_format').value,
     format_mode: getMode() === 'manual' ? 'manual' : 'auto',
@@ -47,7 +48,7 @@ function collectConfig() {
 
 function collectFormatRequest() {
   const c = collectConfig();
-  return { url: c.last_url, proxy_enabled: c.proxy_enabled, proxy: c.proxy, cookies_enabled: c.cookies_enabled, cookies_file: c.cookies_file, impersonate_enabled: c.impersonate_enabled, impersonate_target: c.impersonate_target, extra_args: c.extra_args };
+  return { url: c.last_url, proxy_enabled: c.proxy_enabled, proxy: c.proxy, cookies_enabled: c.cookies_enabled, cookies_file: c.cookies_file, impersonate_enabled: c.impersonate_enabled, impersonate_target: c.impersonate_target, deno_enabled: c.deno_enabled, extra_args: c.extra_args };
 }
 
 function collectDownloadRequest(policy='ask') {
@@ -90,6 +91,7 @@ function updateControls() {
   $('section_end').disabled = !$('section_enabled').checked;
   $('formatsBtn').disabled = !hasUrl || state.running;
   $('downloadBtn').disabled = !hasUrl || state.running || (getMode() === 'manual' && !$('selected_format').value.trim());
+  $('chooseCachedFormatsBtn').disabled = !hasUrl || !findCachedFormats();
   $('stopBtn').disabled = !state.running;
   $('audio_format').disabled = getMode() !== 'audio';
   $('selected_format').disabled = false;
@@ -134,36 +136,91 @@ function closeModal(id) {
   if (id === 'resultModal') stopPreviewPlayback();
 }
 
-async function requestFormats() {
-  const error = validateClient(true);
-  if (error) { showMessage(error, 'error'); return; }
-  await saveConfig(false);
-  state.tempFormat = $('selected_format').value.trim();
-  $('formatFieldMirror').value = state.tempFormat;
-  $('formatsLoading').classList.remove('hidden');
-  $('formatsContent').classList.add('hidden');
-  $('formatsBody').innerHTML = '';
-  $('rawFormats').textContent = '';
-  openModal('formatsModal');
-  showMessage('Запрашиваю доступные форматы...');
-  const data = await api('/api/formats', { method:'POST', body: JSON.stringify(collectFormatRequest()) });
-  state.formats = data.formats;
+function formatCacheKey() {
+  return JSON.stringify(collectFormatRequest());
+}
+
+function findCachedFormats() {
+  return state.formatsCache.get(formatCacheKey());
+}
+
+function showFormatsFromData(data, fromCache=false) {
+  state.formats = data.formats || [];
   $('rawFormats').textContent = data.raw_output || '';
   $('commandLine').value = data.command || '';
   $('formatsLoading').classList.add('hidden');
   $('formatsContent').classList.remove('hidden');
   renderFormats();
-  if (!data.success) showMessage(data.error || 'yt-dlp -F завершился с ошибкой', 'error');
-  else showMessage(`Получено форматов: ${data.formats.length}`);
+  if (fromCache) showMessage(`Показан сохранённый список форматов: ${state.formats.length}`);
+  else if (!data.success) showMessage(data.error || 'yt-dlp -F завершился с ошибкой', 'error');
+  else showMessage(`Получено форматов: ${state.formats.length}`);
+}
+
+function prepareFormatsModal() {
+  state.tempFormat = $('selected_format').value.trim();
+  const parts = state.tempFormat.split('+');
+  state.tempVideoFormat = parts[0] || '';
+  state.tempAudioFormat = parts.length > 1 ? parts.slice(1).join('+') : '';
+  $('formatFieldMirror').value = state.tempFormat;
+  $('formatsBody').innerHTML = '';
+  $('rawFormats').textContent = '';
+  openModal('formatsModal');
+}
+
+async function requestFormats() {
+  const error = validateClient(true);
+  if (error) { showMessage(error, 'error'); return; }
+  await saveConfig(false);
+  prepareFormatsModal();
+  $('formatsLoading').classList.remove('hidden');
+  $('formatsContent').classList.add('hidden');
+  showMessage('Запрашиваю доступные форматы...');
+  const data = await api('/api/formats', { method:'POST', body: JSON.stringify(collectFormatRequest()) });
+  state.formatsCache.set(formatCacheKey(), data);
+  showFormatsFromData(data, false);
+  updateControls();
+}
+
+function openCachedFormats() {
+  const error = validateClient(true);
+  if (error) { showMessage(error, 'error'); return; }
+  const cached = findCachedFormats();
+  if (!cached) { showMessage('Для этой ссылки ещё нет полученного списка форматов. Нажмите «Запросить форматы».', 'error'); return; }
+  prepareFormatsModal();
+  showFormatsFromData(cached, true);
+}
+
+function formatKind(format) {
+  const raw = `${format.raw || ''} ${format.resolution || ''} ${format.video || ''} ${format.audio || ''}`.toLowerCase();
+  const audioOnly = raw.includes('audio only') || raw.includes('audio-only') || format.resolution === 'audio';
+  const hasVideo = Boolean(format.video) && !audioOnly;
+  const hasAudio = Boolean(format.audio) || audioOnly;
+  return { hasVideo, hasAudio, audioOnly };
+}
+
+function buildManualFormat() {
+  const video = state.tempVideoFormat.trim();
+  const audio = state.tempAudioFormat.trim();
+  if (!video) return audio;
+  return audio ? `${video}+${audio}` : video;
 }
 
 function renderFormats() {
-  $('formatsBody').innerHTML = state.formats.map((f, idx) => `<tr data-index="${idx}" class="${f.format_id === state.tempFormat ? 'selected' : ''}"><td>${escapeHtml(f.format_id)}</td><td>${escapeHtml(f.extension)}</td><td>${escapeHtml(f.resolution)}</td><td>${escapeHtml(f.fps)}</td><td>${escapeHtml(f.video)}</td><td>${escapeHtml(f.audio)}</td><td>${escapeHtml(f.size)}</td><td>${escapeHtml(f.note)}</td><td>${escapeHtml(f.raw)}</td></tr>`).join('');
+  $('pickedVideoFormat').textContent = state.tempVideoFormat || '—';
+  $('pickedAudioFormat').textContent = state.tempAudioFormat || '—';
+  $('formatsBody').innerHTML = state.formats.map((f, idx) => {
+    const kind = formatKind(f);
+    const selected = [state.tempVideoFormat, state.tempAudioFormat].includes(f.format_id) || f.format_id === state.tempFormat;
+    const actions = `<button type="button" data-format-role="video" data-index="${idx}">${kind.audioOnly ? 'Готовый' : 'Видео'}</button> ${kind.hasAudio ? `<button type="button" data-format-role="audio" data-index="${idx}">Аудио</button>` : ''}`;
+    return `<tr data-index="${idx}" class="${selected ? 'selected' : ''}"><td>${actions}</td><td>${escapeHtml(f.format_id)}</td><td>${escapeHtml(f.extension)}</td><td>${escapeHtml(f.resolution)}</td><td>${escapeHtml(f.fps)}</td><td>${escapeHtml(f.video)}</td><td>${escapeHtml(f.audio)}</td><td>${escapeHtml(f.size)}</td><td>${escapeHtml(f.note)}</td><td>${escapeHtml(f.raw)}</td></tr>`;
+  }).join('');
 }
 
-function chooseTempFormat(formatId) {
-  state.tempFormat = formatId;
-  $('formatFieldMirror').value = formatId;
+function chooseFormat(formatId, role='video') {
+  if (role === 'audio') state.tempAudioFormat = formatId;
+  else state.tempVideoFormat = formatId;
+  state.tempFormat = buildManualFormat();
+  $('formatFieldMirror').value = state.tempFormat;
   renderFormats();
 }
 
@@ -292,7 +349,7 @@ function repeatHistory(item) {
   $('url').value = item.url || '';
   $('download_dir').value = item.download_dir || 'Downloads';
   setMode(item.mode || 'video');
-  if (item.format && !['video','audio'].includes(item.format)) $('selected_format').value = item.format;
+  if (item.format && !['video','video_only','audio'].includes(item.format)) $('selected_format').value = item.format;
   switchTab('download');
   updateControls();
 }
@@ -346,10 +403,11 @@ function setupEvents() {
   $('toastResultBtn').addEventListener('click', openResultModal);
   $('saveConfigBtn').addEventListener('click', () => saveConfig().catch(e => showMessage(e.message, 'error')));
   $('formatsBtn').addEventListener('click', () => requestFormats().catch(e => { closeModal('formatsModal'); showMessage(e.message, 'error'); }));
+  $('chooseCachedFormatsBtn').addEventListener('click', openCachedFormats);
   $('downloadBtn').addEventListener('click', () => startDownload().catch(e => showMessage(e.message, 'error')));
   $('stopBtn').addEventListener('click', () => stopDownload().catch(e => showMessage(e.message, 'error')));
-  $('formatsBody').addEventListener('click', e => { const tr = e.target.closest('tr'); if (tr) chooseTempFormat(state.formats[Number(tr.dataset.index)].format_id); });
-  $('formatFieldMirror').addEventListener('input', () => { state.tempFormat = $('formatFieldMirror').value.trim(); renderFormats(); });
+  $('formatsBody').addEventListener('click', e => { const button = e.target.closest('[data-format-role]'); if (!button) return; chooseFormat(state.formats[Number(button.dataset.index)].format_id, button.dataset.formatRole); });
+  $('formatFieldMirror').addEventListener('input', () => { state.tempFormat = $('formatFieldMirror').value.trim(); const parts = state.tempFormat.split('+'); state.tempVideoFormat = parts[0] || ''; state.tempAudioFormat = parts.length > 1 ? parts.slice(1).join('+') : ''; renderFormats(); });
   $('useFormatBtn').addEventListener('click', () => applySelectedFormat($('formatFieldMirror').value.trim() || state.tempFormat));
   $('closeFormatsModal').addEventListener('click', () => closeModal('formatsModal'));
   $('copyCommandBtn').addEventListener('click', () => navigator.clipboard.writeText($('commandLine').value));

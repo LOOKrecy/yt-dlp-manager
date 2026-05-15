@@ -45,7 +45,9 @@ def add_access_args(args: list[str], request: FormatRequest | DownloadRequest) -
         args.extend(["--impersonate", request.impersonate_target.strip()])
 
 
-def add_deno_runtime_arg(args: list[str]) -> None:
+def add_deno_runtime_arg(args: list[str], request: FormatRequest | DownloadRequest) -> None:
+    if not request.deno_enabled:
+        return
     deno_path = find_deno_path()
     if deno_path is not None:
         args.extend(["--js-runtimes", f"deno:{deno_path}"])
@@ -54,6 +56,8 @@ def add_deno_runtime_arg(args: list[str]) -> None:
 def add_download_mode_args(args: list[str], request: DownloadRequest) -> None:
     if request.download_mode == "video":
         args.extend(["-f", "bestvideo+bestaudio/best"])
+    elif request.download_mode == "video_only":
+        args.extend(["-f", "bestvideo"])
     elif request.download_mode == "audio":
         args.extend(["-x", "--audio-format", request.audio_format])
     else:
@@ -69,7 +73,7 @@ def build_output_probe_command(request: DownloadRequest) -> list[str]:
     validate_download_request(request)
     download_dir = ensure_writable_directory(request.download_dir)
     args = [str(YT_DLP_PATH), "--skip-download", "--print", "filename"]
-    add_deno_runtime_arg(args)
+    add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     add_download_mode_args(args, request)
     add_section_args(args, request)
@@ -127,7 +131,7 @@ def build_format_command(request: FormatRequest) -> list[str]:
     if not YT_DLP_PATH.exists():
         raise ValueError("yt-dlp.exe не найден в папке bin")
     args = [str(YT_DLP_PATH), "-F"]
-    add_deno_runtime_arg(args)
+    add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     args.extend(split_extra_args(request.extra_args))
     args.append(request.url.strip())
@@ -137,7 +141,7 @@ def build_format_command(request: FormatRequest) -> list[str]:
 def build_download_command(request: DownloadRequest) -> list[str]:
     validate_download_request(request)
     args = [str(YT_DLP_PATH)]
-    add_deno_runtime_arg(args)
+    add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     add_download_mode_args(args, request)
     add_section_args(args, request)

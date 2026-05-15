@@ -14,6 +14,7 @@ from app.history_manager import clear_history, load_history
 from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathRequest, OutputConflictRequest, ToolActionRequest
 from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path
 from app.process_manager import ProcessManager
+from app.text_utils import decode_process_output
 from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats, quote_command, suggest_non_conflicting_filename, template_name_from_path
 
 app = FastAPI(title="Local yt-dlp Manager")
@@ -53,16 +54,15 @@ def _probe_output_path(request: DownloadRequest) -> tuple[Path | None, str, str]
     completed = subprocess.run(
         command,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=120,
         shell=False,
     )
-    raw_output = (completed.stdout or "") + (completed.stderr or "")
+    stdout = decode_process_output(completed.stdout or b"")
+    stderr = decode_process_output(completed.stderr or b"")
+    raw_output = stdout + stderr
     if completed.returncode != 0:
         return None, raw_output, quote_command(command)
-    for line in completed.stdout.splitlines():
+    for line in stdout.splitlines():
         text = line.strip()
         if text:
             return Path(text), raw_output, quote_command(command)
@@ -99,18 +99,16 @@ def impersonate_targets() -> dict:
         completed = subprocess.run(
             [str(YT_DLP_PATH), "--list-impersonate-targets"],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=8,
             shell=False,
         )
+        stdout = decode_process_output(completed.stdout or b"")
     except Exception:
         return {"targets": FALLBACK_IMPERSONATE_TARGETS, "fallback": True}
     if completed.returncode != 0:
         return {"targets": FALLBACK_IMPERSONATE_TARGETS, "fallback": True}
     targets = []
-    for line in completed.stdout.splitlines():
+    for line in stdout.splitlines():
         text = line.strip()
         if text and not text.startswith("-") and " " not in text and text.lower() not in {"available", "impersonate", "targets:"}:
             targets.append(text.rstrip(":"))
@@ -125,13 +123,12 @@ def get_formats(request: FormatRequest) -> dict:
         completed = subprocess.run(
             command,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=120,
             shell=False,
         )
-        raw_output = (completed.stdout or "") + (completed.stderr or "")
+        stdout = decode_process_output(completed.stdout or b"")
+        stderr = decode_process_output(completed.stderr or b"")
+        raw_output = stdout + stderr
         for line in raw_output.splitlines():
             manager.emit("log", line)
         return {
@@ -289,8 +286,8 @@ def tool_action(request: ToolActionRequest) -> dict:
         command = [str(YT_DLP_PATH), "-U"]
     if not Path(command[0]).exists():
         raise HTTPException(status_code=400, detail=f"Инструмент не найден: {command[0]}")
-    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, shell=False)
-    output = (completed.stdout or "") + (completed.stderr or "")
+    completed = subprocess.run(command, capture_output=True, timeout=120, shell=False)
+    output = decode_process_output(completed.stdout or b"") + decode_process_output(completed.stderr or b"")
     manager.emit("log", f"Команда инструмента: {quote_command(command)}")
     for line in output.splitlines():
         manager.emit("log", line)

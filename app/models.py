@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-DownloadMode = Literal["video", "audio", "manual"]
+DownloadMode = Literal["video", "video_only", "audio", "manual"]
 AudioFormat = Literal["m4a", "mp3", "opus", "wav"]
 FormatMode = Literal["auto", "manual"]
 ConflictPolicy = Literal["ask", "rename", "overwrite"]
@@ -23,6 +23,7 @@ class AppConfig(BaseModel):
     section_end: str = "00:00:00"
     impersonate_enabled: bool = False
     impersonate_target: str = ""
+    deno_enabled: bool = False
     download_mode: DownloadMode = "video"
     audio_format: AudioFormat = "m4a"
     format_mode: FormatMode = "auto"
@@ -38,6 +39,7 @@ class FormatRequest(BaseModel):
     cookies_file: str = ""
     impersonate_enabled: bool = False
     impersonate_target: str = ""
+    deno_enabled: bool = False
     extra_args: str = ""
 
 
