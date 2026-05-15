@@ -81,7 +81,7 @@ bin/yt-dlp.exe
 Если файл отсутствует, приложение не упадёт, но покажет статус `Not found`, а запрос форматов и загрузка вернут понятную ошибку.
 
 ## Где взять и куда положить ffmpeg.exe
-Взять тут: (https://github.com/BtbN/FFmpeg-Builds/releases/latest)
+Взять тут: (https://www.gyan.dev/ffmpeg/builds/)
 
 Положить файлы сюда:
 
