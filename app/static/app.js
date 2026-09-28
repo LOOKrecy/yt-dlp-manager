@@ -4,7 +4,7 @@ const state = {
   renderedPreviewKey: '', running: false, conflict: null, tooltipTimer: null, pinnedTooltip: false,
 };
 
-const fields = ['url','download_dir','filename_template','proxy_enabled','proxy','cookies_enabled','cookies_file','section_enabled','section_start','section_end','impersonate_enabled','impersonate_target','deno_enabled','audio_format','selected_format','extra_args'];
+const fields = ['url','download_dir','filename_template','proxy_enabled','proxy','cookies_enabled','cookies_file','section_enabled','section_keyframe_fix','section_start','section_end','impersonate_enabled','impersonate_target','deno_enabled','audio_format','selected_format','extra_args'];
 
 function showMessage(text, type='ok', options={}) {
   const toast = $('toast');
@@ -33,6 +33,7 @@ function collectConfig() {
     cookies_enabled: $('cookies_enabled').checked,
     cookies_file: $('cookies_file').value.trim(),
     section_enabled: $('section_enabled').checked,
+    section_keyframe_fix: $('section_keyframe_fix').checked,
     section_start: $('section_start').value.trim() || '00:00:00',
     section_end: $('section_end').value.trim() || '00:00:00',
     impersonate_enabled: $('impersonate_enabled').checked,
@@ -89,6 +90,7 @@ function updateControls() {
   $('impersonate_target').disabled = !$('impersonate_enabled').checked;
   $('section_start').disabled = !$('section_enabled').checked;
   $('section_end').disabled = !$('section_enabled').checked;
+  $('section_keyframe_fix').disabled = !$('section_enabled').checked;
   $('formatsBtn').disabled = !hasUrl || state.running;
   $('downloadBtn').disabled = !hasUrl || state.running || (getMode() === 'manual' && !$('selected_format').value.trim());
   $('chooseCachedFormatsBtn').disabled = !hasUrl || !findCachedFormats();

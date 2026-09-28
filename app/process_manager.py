@@ -12,10 +12,20 @@ from pathlib import Path
 from typing import Any
 
 from app.history_manager import add_history
+from app.keyframe_fix import (
+    build_frame_probe_command,
+    build_keyframe_trim_command,
+    find_first_decoded_keyframe,
+    needs_keyframe_trim,
+)
 from app.models import DownloadRequest, HistoryEntry
 from app.path_utils import LOGS_DIR, display_path, ensure_project_dirs
 from app.text_utils import decode_process_output
 from app.ytdlp_service import build_download_command, find_result_file_from_logs, quote_command
+
+
+class DownloadStopped(Exception):
+    pass
 
 
 class ProcessManager:
@@ -108,6 +118,8 @@ class ProcessManager:
                 self._write_history(request, "stopped", "", "Процесс остановлен пользователем")
             elif return_code == 0:
                 output_file = find_result_file_from_logs(captured_output)
+                if request.section_enabled and request.section_keyframe_fix and output_file:
+                    self._fix_section_start(Path(output_file))
                 self.status = "success"
                 self.result = self._build_result(output_file, request, "Готово")
                 self.emit("result", "Загрузка завершена", result=self.result)
@@ -117,6 +129,10 @@ class ProcessManager:
                 error = f"yt-dlp завершился с кодом {return_code}"
                 self.emit("log", error)
                 self._write_history(request, "error", "", error)
+        except DownloadStopped:
+            self.status = "stopped"
+            self.emit("log", "Обработка остановлена пользователем")
+            self._write_history(request, "stopped", "", "Обработка остановлена пользователем")
         except Exception as exc:  # noqa: BLE001 - surfaced to UI
             self.status = "error"
             self.emit("log", f"Ошибка backend: {exc}")
@@ -124,6 +140,57 @@ class ProcessManager:
         finally:
             self.process = None
             self.emit("status", self.status)
+
+    def _run_postprocess_command(self, command: list[str], emit_output: bool = True) -> tuple[int, bytes]:
+        self.emit("log", f"Команда обработки: {quote_command(command)}")
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0  # type: ignore[attr-defined]
+        self.process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=False,
+            creationflags=creationflags,
+        )
+        output = bytearray()
+        assert self.process.stdout is not None
+        for line in self.process.stdout:
+            output.extend(line)
+            if emit_output:
+                self.emit("log", decode_process_output(line).rstrip("\r\n"))
+        return self.process.wait(), bytes(output)
+
+    def _fix_section_start(self, output_file: Path) -> None:
+        if not output_file.exists():
+            raise RuntimeError(f"Не найден скачанный файл для проверки ключевого кадра: {output_file}")
+        self.emit("log", "Проверяю начало фрагмента по фактически декодированным кадрам ffprobe...")
+        return_code, raw_probe = self._run_postprocess_command(build_frame_probe_command(output_file), emit_output=False)
+        if self._stop_requested:
+            raise DownloadStopped
+        if return_code != 0:
+            raise RuntimeError(f"ffprobe завершился с кодом {return_code}")
+        timestamp, packet_size = find_first_decoded_keyframe(decode_process_output(raw_probe))
+        if timestamp is None:
+            self.emit("log", "Видеопоток или декодированный I-кадр не найден; файл оставлен без изменений")
+            return
+        if not needs_keyframe_trim(timestamp):
+            self.emit("log", f"Ключевой кадр уже в начале (размер пакета {packet_size} байт)")
+            return
+        self.emit(
+            "log",
+            f"Первый реальный I-кадр найден на {timestamp:.6f} с "
+            f"(размер пакета: {packet_size} байт); обрезаю без перекодирования",
+        )
+        command, temporary = build_keyframe_trim_command(output_file, timestamp)
+        temporary.unlink(missing_ok=True)
+        return_code, _ = self._run_postprocess_command(command)
+        if self._stop_requested:
+            temporary.unlink(missing_ok=True)
+            raise DownloadStopped
+        if return_code != 0 or not temporary.exists() or temporary.stat().st_size == 0:
+            temporary.unlink(missing_ok=True)
+            raise RuntimeError(f"ffmpeg не смог обрезать файл без перекодирования (код {return_code})")
+        temporary.replace(output_file)
+        self.emit("log", "Исходный файл заменён версией, начинающейся с ключевого кадра")
 
     def _build_result(self, output_file: str, request: DownloadRequest, status: str) -> dict[str, Any]:
         path = Path(output_file) if output_file else None
