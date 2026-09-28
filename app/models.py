@@ -19,6 +19,7 @@ class AppConfig(BaseModel):
     cookies_enabled: bool = False
     cookies_file: str = ""
     section_enabled: bool = False
+    section_keyframe_fix: bool = True
     section_start: str = "00:00:00"
     section_end: str = "00:00:00"
     impersonate_enabled: bool = False

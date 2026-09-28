@@ -85,6 +85,7 @@
         <div class="card">
           <h2>Фрагмент <button type="button" class="help" data-help="Скачивает только часть видео. Для нарезки нужен ffmpeg.exe.">?</button></h2>
           <label><input id="section_enabled" type="checkbox"> Скачать только фрагмент</label>
+          <label><input id="section_keyframe_fix" type="checkbox" checked> Обрезать начало до первого ключевого кадра <button type="button" class="help" data-help="После загрузки ffprobe анализирует реально декодированные I-кадры и размер их пакетов. Если первый ключевой кадр не в начале, ffmpeg без перекодирования заменит файл версией, начинающейся с него.">?</button></label>
           <div class="grid two compact">
             <label>Начало <input id="section_start" type="text" value="00:00:00" placeholder="HH:MM:SS" disabled></label>
             <label>Конец <input id="section_end" type="text" value="00:00:00" placeholder="HH:MM:SS" disabled></label>

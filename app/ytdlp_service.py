@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 from app.models import DownloadRequest, FormatItem, FormatRequest
-from app.path_utils import FFMPEG_PATH, YT_DLP_PATH, build_output_template, ensure_writable_directory, find_deno_path, resolve_user_path
+from app.path_utils import FFMPEG_PATH, FFPROBE_PATH, YT_DLP_PATH, build_output_template, ensure_writable_directory, find_deno_path, resolve_user_path
 
 FALLBACK_IMPERSONATE_TARGETS = ["chrome", "chrome-110", "chrome-120", "edge", "safari", "firefox"]
 
@@ -121,6 +121,8 @@ def validate_download_request(request: DownloadRequest) -> None:
         end = parse_time(request.section_end)
         if end <= start:
             raise ValueError("Конец фрагмента должен быть больше начала")
+        if request.section_keyframe_fix and not FFPROBE_PATH.exists():
+            raise ValueError("ffprobe.exe не найден: он нужен для поиска первого ключевого кадра")
     if request.download_mode == "manual" and not request.selected_format.strip():
         raise ValueError("В ручном режиме формат не выбран")
     ensure_writable_directory(request.download_dir)
