@@ -54,6 +54,11 @@
             <input id="selected_format" type="text" placeholder="137+140 или bestvideo+bestaudio/best">
           </label>
           <button id="chooseCachedFormatsBtn" type="button">Выбрать из полученного списка</button>
+          <div class="actions mode-actions">
+            <button id="formatsBtn" class="primary" type="button" disabled>Запросить форматы</button>
+            <button id="estimateSizeBtn" type="button" disabled>Оценить размер</button>
+          </div>
+          <p id="estimatedSize" class="size-estimate">Предполагаемый размер: не оценён</p>
         </div>
 
         <div class="card">
@@ -64,6 +69,7 @@
           <label>Имя файла (необязательно) <button type="button" class="help" data-help="Если оставить пустым, yt-dlp возьмёт название ролика. Недопустимые символы Windows будут заменены.">?</button>
             <input id="filename_template" type="text" placeholder="my_video">
           </label>
+          <label><input id="resume_downloads" type="checkbox" checked> Продолжать незавершённые загрузки</label>
         </div>
       </div>
 
@@ -98,9 +104,8 @@
 
       <div class="actions sticky-actions">
         <button id="saveConfigBtn">Сохранить настройки</button>
-        <button id="formatsBtn" class="primary" disabled>Запросить форматы <span class="help-inline" title="Откроет всплывающее окно со списком форматов">?</span></button>
         <button id="downloadBtn" class="primary" disabled>Скачать</button>
-        <button id="stopBtn" class="danger" disabled>Остановить</button>
+        <button id="stopBtn" class="danger" disabled>Остановить все</button>
         <button id="showResultBtn" disabled>Показать результат</button>
       </div>
     </section>
@@ -108,6 +113,7 @@
     <section id="logs" class="panel">
       <div class="card">
         <h2>Логи <button type="button" class="help" data-help="Поток сообщений yt-dlp и backend. Блок ограничен по высоте и прокручивается внутри.">?</button></h2>
+        <div id="jobsList" class="jobs-list"><p>Загрузок пока нет.</p></div>
         <label>Итоговая команда <input id="commandLine" readonly></label>
         <div class="actions">
           <button id="copyCommandBtn">Копировать команду</button>
@@ -149,6 +155,7 @@
         <h2>Окружение <button type="button" class="help" data-help="Проверяет наличие yt-dlp.exe, ffmpeg.exe, ffprobe.exe, deno.exe, папок данных, логов и загрузок.">?</button></h2>
         <button id="refreshEnvBtn">Обновить статус</button>
         <div id="environment" class="env-grid"></div>
+        <p class="download-links">Загрузки: <a href="https://github.com/yt-dlp/yt-dlp/releases/latest" target="_blank" rel="noreferrer">yt-dlp</a> · <a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noreferrer">ffmpeg/ffprobe</a> · <a href="https://github.com/denoland/deno/releases/latest" target="_blank" rel="noreferrer">Deno</a>.</p>
       </div>
       <div class="card">
         <h2>Инструменты</h2>
@@ -157,6 +164,8 @@
           <button data-tool="ffmpeg-version">Проверить версию ffmpeg</button>
           <button data-tool="deno-version">Проверить версию Deno</button>
           <button data-tool="yt-dlp-update">Обновить yt-dlp</button>
+          <button data-tool="project-check">Проверить обновление менеджера</button>
+          <button data-tool="project-update">Обновить менеджер (git pull)</button>
         </div>
         <pre id="toolOutput" class="raw-output"></pre>
       </div>
@@ -222,6 +231,12 @@
         <button id="conflictOverwriteBtn" class="danger">Перезаписать старый</button>
         <button id="conflictCancelBtn">Отмена</button>
       </div>
+    </div>
+  </div>
+
+  <div id="resumeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="resumeTitle">
+    <div class="modal-backdrop"></div><div class="modal-card"><div class="modal-header"><h2 id="resumeTitle">Найдена незавершённая загрузка</h2></div>
+      <p id="resumeMessage"></p><div id="resumeActions" class="actions"></div>
     </div>
   </div>
 

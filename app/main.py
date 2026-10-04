@@ -12,10 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from app.config_manager import load_config, save_config
 from app.history_manager import clear_history, load_history
 from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathRequest, OutputConflictRequest, ToolActionRequest
-from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path
+from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path, sanitize_filename_template
 from app.process_manager import ProcessManager
 from app.text_utils import decode_process_output
-from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats, quote_command, suggest_non_conflicting_filename, template_name_from_path
+from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats, quality_key, quote_command, suggest_non_conflicting_filename, template_name_from_path
 
 app = FastAPI(title="Local yt-dlp Manager")
 manager = ProcessManager()
@@ -71,7 +71,9 @@ def _probe_output_path(request: DownloadRequest) -> tuple[Path | None, str, str]
 
 @app.on_event("startup")
 async def startup() -> None:
-    _install_client_disconnect_exception_filter(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    _install_client_disconnect_exception_filter(loop)
+    manager.set_event_queue(event_queue, loop)
     load_config()
     environment_status(include_versions=False)
 
@@ -177,6 +179,24 @@ def output_conflict(request: OutputConflictRequest) -> dict:
 @app.post("/api/download")
 def start_download(request: DownloadRequest) -> dict:
     try:
+        previous = next((item for item in load_history() if item.url == request.url and item.status in {"stopped", "error"}), None)
+        if request.resume_downloads and request.resume_policy == "ask" and previous:
+            same_quality = previous.quality_key == quality_key(request) if previous.quality_key else previous.format == (request.selected_format if request.download_mode == "manual" else request.download_mode)
+            old_name = previous.filename_template or previous.title
+            if not same_quality or old_name != request.filename_template:
+                return {"success": False, "resume_conflict": True, "same_quality": same_quality,
+                        "old_name": old_name, "new_name": request.filename_template,
+                        "old_mode": previous.mode, "old_format": previous.format,
+                        "message": "Найдена незавершённая попытка для этой ссылки"}
+        if request.resume_policy == "restart" and previous:
+            # Remove only temporary yt-dlp artefacts associated with the prior
+            # user-supplied name. Completed media files are never deleted here.
+            old_name = sanitize_filename_template(previous.filename_template or previous.title)
+            directory = resolve_user_path(previous.download_dir, None)
+            if old_name and directory.exists():
+                for partial in directory.glob(f"{old_name}.*.part*"):
+                    if partial.is_file():
+                        partial.unlink(missing_ok=True)
         if request.conflict_policy in {"ask", "rename"}:
             path, raw_output, command = _probe_output_path(request)
             if path is not None and path.exists():
@@ -203,8 +223,8 @@ def start_download(request: DownloadRequest) -> dict:
 
 
 @app.post("/api/download/stop")
-def stop_download() -> dict:
-    stopped = manager.stop()
+def stop_download(job_id: str = "") -> dict:
+    stopped = manager.stop(job_id)
     return {"success": stopped, "message": "Download process stopped" if stopped else "Нет активной загрузки"}
 
 
@@ -282,12 +302,20 @@ def tool_action(request: ToolActionRequest) -> dict:
     elif request.action == "deno-version":
         deno_path = find_deno_path() or DENO_PATH
         command = [str(deno_path), "--version"]
-    else:
+    elif request.action == "yt-dlp-update":
         command = [str(YT_DLP_PATH), "-U"]
-    if not Path(command[0]).exists():
+    elif request.action == "project-check":
+        command = ["git", "fetch", "--quiet"]
+    else:
+        command = ["git", "pull", "--ff-only"]
+    if request.action.startswith(("yt-dlp", "ffmpeg", "deno")) and not Path(command[0]).exists():
         raise HTTPException(status_code=400, detail=f"Инструмент не найден: {command[0]}")
-    completed = subprocess.run(command, capture_output=True, timeout=120, shell=False)
+    completed = subprocess.run(command, capture_output=True, timeout=120, shell=False, cwd=Path(__file__).resolve().parent.parent)
     output = decode_process_output(completed.stdout or b"") + decode_process_output(completed.stderr or b"")
+    if request.action == "project-check" and completed.returncode == 0:
+        comparison = subprocess.run(["git", "rev-list", "--count", "HEAD..@{upstream}"], capture_output=True, timeout=15, shell=False, cwd=Path(__file__).resolve().parent.parent)
+        count = decode_process_output(comparison.stdout or b"").strip()
+        output = f"Доступно новых коммитов: {count or 'не удалось определить'}"
     manager.emit("log", f"Команда инструмента: {quote_command(command)}")
     for line in output.splitlines():
         manager.emit("log", line)

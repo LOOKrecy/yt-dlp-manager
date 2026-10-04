@@ -72,6 +72,12 @@ if errorlevel 1 (
   exit /b 1
 )
 
+if exist "bin\yt-dlp.exe" (
+  echo Checking for yt-dlp updates...
+  "bin\yt-dlp.exe" -U
+  if errorlevel 1 echo WARNING: yt-dlp update check failed; starting with the installed version.
+)
+
 echo Opening %APP_URL% ...
 start "" "%APP_URL%"
 

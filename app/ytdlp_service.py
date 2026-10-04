@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import re
 from pathlib import Path
 from app.models import DownloadRequest, FormatItem, FormatRequest
 from app.path_utils import FFMPEG_PATH, FFPROBE_PATH, YT_DLP_PATH, build_output_template, ensure_writable_directory, find_deno_path, resolve_user_path
@@ -143,6 +144,9 @@ def build_format_command(request: FormatRequest) -> list[str]:
 def build_download_command(request: DownloadRequest) -> list[str]:
     validate_download_request(request)
     args = [str(YT_DLP_PATH)]
+    # yt-dlp resumes matching .part files by default.  Keep this explicit so a
+    # user's extra arguments cannot make the manager's option ambiguous.
+    args.extend(["--continue", "--newline"] if request.resume_downloads and request.resume_policy != "restart" else ["--no-continue", "--no-part"])
     add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     add_download_mode_args(args, request)
@@ -181,9 +185,24 @@ def parse_formats(raw_output: str) -> list[FormatItem]:
         note = " ".join(columns[3:]) if len(columns) > 3 else ""
         video = "video" if "video" in raw.lower() or resolution not in {"audio", "audio-only"} else ""
         audio = "audio" if "audio" in raw.lower() else ""
-        size = next((item for item in columns if item.lower().endswith(("kib", "mib", "gib", "b"))), "")
-        formats.append(FormatItem(format_id=format_id, extension=extension, resolution=resolution, fps=fps, video=video, audio=audio, size=size, note=note, raw=raw))
+        size_match = re.search(r"(?:~|≈)?\s*([\d.,]+)\s*(KiB|MiB|GiB|KB|MB|GB|B)", raw, re.IGNORECASE)
+        size = f"{size_match.group(1)} {size_match.group(2)}" if size_match else ""
+        size_bytes = 0
+        if size_match:
+            value = float(size_match.group(1).replace(",", "."))
+            powers = {"b": 1, "kib": 1024, "mib": 1024**2, "gib": 1024**3, "kb": 1000, "mb": 1000**2, "gb": 1000**3}
+            size_bytes = int(value * powers[size_match.group(2).lower()])
+        formats.append(FormatItem(format_id=format_id, extension=extension, resolution=resolution, fps=fps, video=video, audio=audio, size=size, size_bytes=size_bytes, note=note, raw=raw))
     return formats
+
+
+def quality_key(request: DownloadRequest) -> str:
+    """Stable identity for resumable media requirements; deliberately excludes its name."""
+    fmt = request.selected_format.strip() if request.download_mode == "manual" else request.download_mode
+    if request.download_mode == "audio":
+        fmt += f":{request.audio_format}"
+    section = f":{request.section_start}-{request.section_end}" if request.section_enabled else ""
+    return f"{fmt}{section}"
 
 
 def find_result_file_from_logs(lines: list[str]) -> str:
