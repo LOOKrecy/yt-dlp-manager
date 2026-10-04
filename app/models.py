@@ -8,6 +8,7 @@ DownloadMode = Literal["video", "video_only", "audio", "manual"]
 AudioFormat = Literal["m4a", "mp3", "opus", "wav"]
 FormatMode = Literal["auto", "manual"]
 ConflictPolicy = Literal["ask", "rename", "overwrite"]
+ResumePolicy = Literal["ask", "continue", "restart"]
 
 
 class AppConfig(BaseModel):
@@ -30,6 +31,7 @@ class AppConfig(BaseModel):
     format_mode: FormatMode = "auto"
     selected_format: str = ""
     extra_args: str = ""
+    resume_downloads: bool = True
 
 
 class FormatRequest(BaseModel):
@@ -47,6 +49,7 @@ class FormatRequest(BaseModel):
 class DownloadRequest(AppConfig):
     url: str = Field(default="")
     conflict_policy: ConflictPolicy = "ask"
+    resume_policy: ResumePolicy = "ask"
 
 
 class OutputConflictRequest(DownloadRequest):
@@ -61,6 +64,7 @@ class FormatItem(BaseModel):
     video: str = ""
     audio: str = ""
     size: str = ""
+    size_bytes: int = 0
     note: str = ""
     raw: str
 
@@ -76,6 +80,8 @@ class HistoryEntry(BaseModel):
     format: str = ""
     status: str
     error: str = ""
+    filename_template: str = ""
+    quality_key: str = ""
 
 
 class OpenPathRequest(BaseModel):
@@ -83,4 +89,4 @@ class OpenPathRequest(BaseModel):
 
 
 class ToolActionRequest(BaseModel):
-    action: Literal["yt-dlp-version", "ffmpeg-version", "deno-version", "yt-dlp-update"]
+    action: Literal["yt-dlp-version", "ffmpeg-version", "deno-version", "yt-dlp-update", "project-check", "project-update"]
