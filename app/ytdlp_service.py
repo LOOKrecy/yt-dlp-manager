@@ -16,6 +16,36 @@ def quote_command(args: list[str]) -> str:
     return subprocess.list2cmdline([str(arg) for arg in args])
 
 
+def redact_args(args: list[str]) -> list[str]:
+    hidden = {"--proxy", "--cookies", "--add-header", "--username", "--password", "--video-password"}
+    result = list(args)
+    for index, argument in enumerate(result[:-1]):
+        if argument in hidden:
+            result[index + 1] = "***"
+    for index, argument in enumerate(result):
+        name, separator, _ = argument.partition("=")
+        if separator and name in hidden:
+            result[index] = f"{name}=***"
+    if result:
+        try:
+            parts = urlsplit(result[-1])
+            if parts.scheme and parts.query:
+                result[-1] = urlunsplit((parts.scheme, parts.netloc, parts.path, "…", ""))
+        except ValueError:
+            pass
+    return result
+
+
+def redact_diagnostic_text(text: str) -> str:
+    """Best-effort redaction for bounded stderr shown through the local UI."""
+    redacted = text
+    sensitive = r"(?:proxy|cookies?|add-header|username|password|video-password)"
+    redacted = re.sub(rf"(?i)(--{sensitive})(?:=|\s+)(?:\"[^\"]*\"|'[^']*'|\S+)", r"\1=***", redacted)
+    redacted = re.sub(r"(?i)(https?://[^\s?#]+)\?[^\s]+", r"\1?…", redacted)
+    redacted = re.sub(r"(?i)(authorization|cookie|token|api[_-]?key)(\s*[:=]\s*)[^\s,;]+", r"\1\2***", redacted)
+    return redacted
+
+
 def split_extra_args(extra_args: str) -> list[str]:
     if not (extra_args or "").strip():
         return []
@@ -177,10 +207,15 @@ def build_format_command(request: FormatRequest) -> list[str]:
 
 def build_download_command(request: DownloadRequest, attempt: int = 1, output_template: str = "") -> list[str]:
     validate_download_request(request)
-    args = [str(YT_DLP_PATH), "--ignore-config", "--no-playlist", "--newline", "--part", "--socket-timeout", str(request.socket_timeout), "--retries", "3", "--fragment-retries", "3", "--retry-sleep", "http:3", "--retry-sleep", "fragment:3"]
+    args = [str(YT_DLP_PATH), "--ignore-config", "--no-playlist", "--newline", "--part", "--progress", "--no-quiet", "--socket-timeout", str(request.socket_timeout), "--retries", "3", "--fragment-retries", "3", "--retry-sleep", "http:3", "--retry-sleep", "fragment:3"]
     # yt-dlp resumes matching .part files by default.  Keep this explicit so a
     # user's extra arguments cannot make the manager's option ambiguous.
-    args.append("--continue")
+    # Restart affects only the first invocation of a logical job. Automatic
+    # attempts always preserve and continue its partial artifacts.
+    if attempt > 1 or (request.resume_downloads and request.resume_policy != "restart"):
+        args.append("--continue")
+    else:
+        args.append("--no-continue")
     add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     add_download_mode_args(args, request)
@@ -229,18 +264,7 @@ def parse_formats_metadata(raw_output: str) -> tuple[list[FormatItem], dict]:
 
 
 def parse_formats(raw_output: str) -> list[FormatItem]:
-    try:
-        metadata = json.loads(raw_output)
-    except json.JSONDecodeError:
-        metadata = None
-    if isinstance(metadata, dict):
-        result = []
-        for item in metadata.get("formats", []):
-            v, a = item.get("vcodec") or "none", item.get("acodec") or "none"
-            kind = "muxed" if v != "none" and a != "none" else "video" if v != "none" else "audio" if a != "none" else "unknown"
-            size = item.get("filesize") or item.get("filesize_approx") or 0
-            result.append(FormatItem(format_id=str(item.get("format_id", "")), extension=item.get("ext") or "", resolution=item.get("resolution") or "", fps=str(item.get("fps") or ""), video=v, audio=a, size_bytes=int(size), note=item.get("format_note") or "", protocol=item.get("protocol") or "", language=item.get("language") or "", dynamic_range=item.get("dynamic_range") or "", kind=kind, approximate=not bool(item.get("filesize")), raw=json.dumps(item, ensure_ascii=False)))
-        return result
+    """Legacy -F parser retained only for explicit compatibility callers."""
     formats: list[FormatItem] = []
     for line in raw_output.splitlines():
         raw = line.rstrip()

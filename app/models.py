@@ -72,6 +72,7 @@ class FormatItem(BaseModel):
     size: str = ""
     size_bytes: int = 0
     note: str = ""
+    audio_name: str = ""
     raw: str = ""
     protocol: str = ""
     language: str = ""

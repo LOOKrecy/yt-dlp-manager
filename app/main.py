@@ -16,7 +16,7 @@ from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathReques
 from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path, sanitize_filename_template
 from app.process_manager import ProcessManager
 from app.text_utils import decode_process_output
-from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats_metadata, quote_command, redact_args, suggest_non_conflicting_filename, template_name_from_path
+from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats_metadata, quote_command, redact_args, redact_diagnostic_text, suggest_non_conflicting_filename, template_name_from_path
 
 app = FastAPI(title="Local yt-dlp Manager")
 manager = ProcessManager()
@@ -133,17 +133,19 @@ def get_formats(request: FormatRequest) -> dict:
             shell=False,
         )
         stdout = decode_process_output(completed.stdout or b"")
-        stderr = decode_process_output(completed.stderr or b"")
-        raw_output = stdout
-        for line in raw_output.splitlines():
-            manager.emit("log", line)
+        stderr = redact_diagnostic_text(decode_process_output(completed.stderr or b""))
+        if completed.returncode != 0:
+            diagnostic = "\n".join(stderr.splitlines()[-40:])
+            return {"success": False, "formats": [], "diagnostic": {}, "stderr": diagnostic,
+                    "command": safe_command, "error": f"yt-dlp metadata завершился с кодом {completed.returncode}: {diagnostic}"}
+        formats, diagnostic = parse_formats_metadata(stdout)
         return {
-            "success": completed.returncode == 0,
-            "formats": [item.model_dump() for item in parse_formats(raw_output)],
-            "raw_output": raw_output,
-            "command": quote_command(command),
-            "stderr": stderr,
-            "error": "" if completed.returncode == 0 else f"yt-dlp metadata завершился с кодом {completed.returncode}",
+            "success": True,
+            "formats": [item.model_dump(exclude={"raw"}) for item in formats],
+            "diagnostic": diagnostic,
+            "command": safe_command,
+            "stderr": "\n".join(stderr.splitlines()[-40:]),
+            "error": "",
         }
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=504, detail={"code": "formats_timeout", "message": "yt-dlp не ответил за 120 секунд"}) from exc
@@ -238,9 +240,9 @@ def jobs() -> dict:
 
 
 @app.get("/api/jobs/{job_id}/log")
-def job_log(job_id: str, limit: int = 300) -> dict:
+def job_log(job_id: str, limit: int = 300, offset: int = 0) -> dict:
     if job_id not in manager.jobs: raise HTTPException(status_code=404, detail="Задание не найдено")
-    return {"job_id": job_id, "lines": manager.log_tail(job_id, limit)}
+    return {"job_id": job_id, **manager.log_tail(job_id, limit, offset)}
 
 
 @app.post("/api/logs/clear")

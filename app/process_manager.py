@@ -17,12 +17,13 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from app.history_manager import add_history
+from app.keyframe_fix import build_frame_probe_command, build_keyframe_trim_command, find_first_decoded_keyframe, needs_keyframe_trim
 from app.json_store import atomic_write, read
 from app.models import DownloadRequest, HistoryEntry
 from app.path_utils import JOBS_PATH, LOGS_DIR, build_output_template, ensure_project_dirs, ensure_writable_directory
 from app.recovery import Failure, classify_failure, retry_delay
 from app.text_utils import decode_process_output
-from app.ytdlp_service import build_download_command, quality_key, quote_command
+from app.ytdlp_service import build_download_command, quality_key, quote_command, redact_args
 
 ACTIVE = {"queued", "preparing", "downloading", "retry_wait", "postprocessing"}
 TERMINAL = {"stopped", "error", "success", "interrupted"}
@@ -52,6 +53,9 @@ class DownloadJob:
     manifest: list[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     completed_at: str = ""
+    command: str = ""
+    argv: list[str] = field(default_factory=list)
+    last_message_at: str = ""
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     retry_now: threading.Event = field(default_factory=threading.Event, repr=False)
     diagnostic_tail: deque[str] = field(default_factory=lambda: deque(maxlen=80), repr=False)
@@ -64,6 +68,7 @@ class DownloadJob:
                 "result": dict(self.result), "running": self.process is not None and self.process.poll() is None,
                 "url": self.request.url, "filename": self.request.filename_template, "started_at": self.started_at,
                 "completed_at": self.completed_at, "attempts": list(self.attempts),
+                "command": self.command, "argv": list(self.argv), "last_message_at": self.last_message_at,
                 "access_summary": {"proxy": self.request.proxy_enabled, "cookies": self.request.cookies_enabled, "section": self.request.section_enabled}}
 
     def stored(self) -> dict[str, Any]:
@@ -121,7 +126,7 @@ class ProcessManager:
             try:
                 request = DownloadRequest(**raw["request"]); status = raw.get("status", "interrupted")
                 if status in ACTIVE: status = "interrupted"
-                job = DownloadJob(raw["id"], request, raw["output_template"], status=status, attempt=raw.get("attempt", 0), reason="Работа backend была прервана" if status == "interrupted" else raw.get("reason", ""), result=raw.get("result", {}), attempts=raw.get("attempts", []), manifest=raw.get("manifest", []), started_at=raw.get("started_at", ""), completed_at=raw.get("completed_at", ""))
+                job = DownloadJob(raw["id"], request, raw["output_template"], status=status, attempt=raw.get("attempt", 0), reason="Работа backend была прервана" if status == "interrupted" else raw.get("reason", ""), result=raw.get("result", {}), attempts=raw.get("attempts", []), manifest=raw.get("manifest", []), started_at=raw.get("started_at", ""), completed_at=raw.get("completed_at", ""), command=raw.get("command", ""), argv=raw.get("argv", []), last_message_at=raw.get("last_message_at", ""))
                 self.jobs[job.id] = job; self._reserved[job.output_template.casefold()] = job.id
             except Exception: continue
 
@@ -130,9 +135,12 @@ class ProcessManager:
         return {"revision": self.broker.revision, "jobs": jobs, "running_count": sum(j["status"] in ACTIVE for j in jobs)}
 
     def get_logs(self) -> dict[str, Any]: return self.snapshot()
-    def log_tail(self, job_id: str, limit: int = 300) -> list[str]:
+    def log_tail(self, job_id: str, limit: int = 300, offset: int = 0) -> dict[str, Any]:
         path = LOGS_DIR / f"{job_id}.log"
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(1, min(limit, 2000)):] if path.exists() else []
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines() if path.exists() else []
+        limit = max(1, min(limit, 2000)); start = max(0, offset) if offset else max(0, len(lines) - limit)
+        modified = datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds") if path.exists() else ""
+        return {"lines": lines[start:start + limit], "next_offset": min(len(lines), start + limit), "total": len(lines), "last_message_at": modified}
 
     def clear_logs(self) -> None:
         # Only clear the visible tails/files explicitly; job state is untouched.
@@ -147,42 +155,61 @@ class ProcessManager:
             owner = self._reserved.get(key)
             if owner and self.jobs.get(owner) and self.jobs[owner].status not in {"success"}: raise ValueError("Этот целевой путь уже зарезервирован другим заданием")
             job = DownloadJob(job_id, request.model_copy(deep=True), template); self.jobs[job.id] = job; self._reserved[key] = job.id
-        self._persist(); threading.Thread(target=self._worker, args=(job,), daemon=True).start(); return job.id
+        self._persist(); self._publish(job, "Добавлено в очередь"); threading.Thread(target=self._worker, args=(job,), daemon=True).start(); return job.id
+
+    def _publish(self, job: DownloadJob, message: str) -> None:
+        try:
+            self._persist(); self.emit("job", message, job.id, job=job.public())
+        except Exception:
+            # State transitions must not die because diagnostics storage failed.
+            self.broker.publish({"type": "job", "message": message, "job_id": job.id, "job": job.public()})
 
     def _worker(self, job: DownloadJob) -> None:
         with self._slots:
-            if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено до запуска")
-            cdn_refreshes = 0
-            while True:
-                job.attempt += 1; job.attempt_id = str(uuid.uuid4()); current = job.attempt_id; job.status = job.stage = "preparing"; job.next_retry_at = ""; job.diagnostic_tail.clear()
-                args = build_download_command(job.request, job.attempt, job.output_template)
-                safe_args = self._redact_args(args)
-                self._append_log(job.id, f"=== attempt {job.attempt} ({current}) ===\nargv-json: {json.dumps(safe_args, ensure_ascii=False)}\ncmd-display (не для shell): {quote_command(safe_args)}")
+            try:
                 if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено до запуска")
-                code, output = self._run_attempt(job, args, current)
-                if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено пользователем")
-                failure = classify_failure(job.stage, code, list(job.diagnostic_tail)) if code else None
-                job.attempts.append({"number": job.attempt, "attempt_id": current, "return_code": code, "reason": failure.code if failure else "success"})
-                if code == 0:
-                    result_path = Path(output) if output else None
-                    if not result_path or not result_path.exists() or result_path.stat().st_size <= 0:
-                        failure = Failure("missing_output", "manual", "yt-dlp завершился без непустого итогового файла")
-                    else:
-                        job.manifest.append(str(result_path)); return self._finish(job, "success", "Готово", str(result_path))
-                assert failure is not None
-                job.reason = failure.message; job.return_code = code
-                allowed = job.request.auto_retry and job.attempt <= job.request.max_restarts
-                if failure.action == "refresh_once":
-                    allowed = allowed and cdn_refreshes < 1; cdn_refreshes += 1
-                elif failure.action not in {"retry", "retry_429"}: allowed = False
-                if not allowed: return self._finish(job, "error", failure.message)
-                delay = failure.retry_after or retry_delay(job.attempt)
-                job.status = job.stage = "retry_wait"; job.next_retry_at = (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds"); self._persist(); self.emit("job", failure.message, job.id, job=job.public())
-                job.retry_now.clear()
-                deadline = time.monotonic() + delay
-                while not job.cancel_event.is_set() and not job.retry_now.is_set() and time.monotonic() < deadline:
-                    self._wait(job.cancel_event, min(.25, max(0, deadline - time.monotonic())))
-                if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено во время ожидания")
+                cdn_refreshes = 0
+                while True:
+                    job.attempt += 1; job.attempt_id = str(uuid.uuid4()); current = job.attempt_id
+                    job.status = job.stage = "preparing"; job.next_retry_at = ""; job.diagnostic_tail.clear(); self._publish(job, "Получение метаданных")
+                    args = build_download_command(job.request, job.attempt, job.output_template)
+                    safe_args = self._redact_args(args); job.argv = safe_args; job.command = quote_command(safe_args)
+                    self._safe_log(job, f"=== attempt {job.attempt} ({current}) ===\nargv-json: {json.dumps(safe_args, ensure_ascii=False)}\ncmd-display (не для shell): {job.command}")
+                    if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено до запуска")
+                    code, output = self._run_attempt(job, args, current)
+                    if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено пользователем")
+                    failure = classify_failure(job.stage, code, list(job.diagnostic_tail)) if code else None
+                    job.attempts.append({"number": job.attempt, "attempt_id": current, "return_code": code, "reason": failure.code if failure else "success"})
+                    if code == 0:
+                        result_path = Path(output) if output else None
+                        if not result_path or not result_path.exists() or result_path.stat().st_size <= 0:
+                            failure = Failure("missing_output", "manual", "yt-dlp завершился без непустого итогового файла")
+                        else:
+                            job.manifest.append(str(result_path))
+                            if job.request.section_enabled and job.request.section_keyframe_fix:
+                                try: self._fix_section_start(job, result_path)
+                                except Exception as exc:
+                                    if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено во время постобработки")
+                                    return self._finish(job, "error", f"Ошибка постобработки: {exc}")
+                            return self._finish(job, "success", "Готово", str(result_path))
+                    assert failure is not None
+                    job.reason = failure.message; job.return_code = code
+                    allowed = job.request.auto_retry and job.attempt <= job.request.max_restarts
+                    if failure.action == "refresh_once": allowed = allowed and cdn_refreshes < 1; cdn_refreshes += 1
+                    elif failure.action not in {"retry", "retry_429"}: allowed = False
+                    if not allowed: return self._finish(job, "error", failure.message)
+                    delay = failure.retry_after or retry_delay(job.attempt)
+                    job.status = job.stage = "retry_wait"; job.next_retry_at = (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds"); self._publish(job, failure.message)
+                    job.retry_now.clear(); deadline = time.monotonic() + delay
+                    while not job.cancel_event.is_set() and not job.retry_now.is_set() and time.monotonic() < deadline:
+                        self._wait(job.cancel_event, min(.25, max(0, deadline - time.monotonic())))
+                    if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено во время ожидания")
+            except Exception as exc:
+                reason = f"Ошибка задания: {exc}"
+                self._safe_log(job, reason)
+                self._finish(job, "stopped" if job.cancel_event.is_set() else "error", "Остановлено пользователем" if job.cancel_event.is_set() else reason)
+            finally:
+                if job.process is not None and job.process.poll() is not None: job.process = None
 
     def _run_attempt(self, job: DownloadJob, args: list[str], attempt_id: str) -> tuple[int, str]:
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0  # type: ignore[attr-defined]
@@ -191,16 +218,62 @@ class ProcessManager:
         with self._lock:
             if job.attempt_id != attempt_id: return 1, ""
             job.process = process
+        self._publish(job, "yt-dlp запущен; получение метаданных")
         if job.cancel_event.is_set(): self._terminate(job)
-        job.status = job.stage = "downloading"; result = ""; assert process.stdout is not None
-        for raw in process.stdout:
-            text = decode_process_output(raw).rstrip("\r\n"); job.diagnostic_tail.append(text); self._append_log(job.id, text)
-            if text.startswith("__YTM_PROGRESS__"): self._progress(job, text[len("__YTM_PROGRESS__"):], attempt_id)
-            elif text.startswith("__YTM_RESULT__"): result = text[len("__YTM_RESULT__"):].strip()
-        code = process.wait(); job.return_code = code
-        with self._lock:
-            if job.attempt_id == attempt_id: job.process = None
-        return code, result
+        result = ""; assert process.stdout is not None
+        try:
+            for raw in process.stdout:
+                text = decode_process_output(raw).rstrip("\r\n"); job.diagnostic_tail.append(text); self._safe_log(job, text)
+                if text.startswith("__YTM_PROGRESS__"):
+                    if job.stage != "downloading": job.status = job.stage = "downloading"; self._publish(job, "Скачивание")
+                    self._progress(job, text[len("__YTM_PROGRESS__"):], attempt_id)
+                elif text.startswith("__YTM_RESULT__"):
+                    job.status = job.stage = "postprocessing"; self._publish(job, "Завершение обработки"); result = text[len("__YTM_RESULT__"):].strip()
+                elif text.startswith(("[Merger]", "[ExtractAudio]", "[VideoConvertor]", "[Fixup")) and job.stage != "postprocessing":
+                    job.status = job.stage = "postprocessing"; self._publish(job, "Обработка ffmpeg")
+            code = process.wait(); job.return_code = code
+            return code, result
+        finally:
+            try: process.stdout.close()
+            except OSError: pass
+            with self._lock:
+                if job.attempt_id == attempt_id: job.process = None
+
+    def _safe_log(self, job: DownloadJob, message: str) -> None:
+        job.last_message_at = datetime.now().isoformat(timespec="seconds")
+        try: self._append_log(job.id, message)
+        except OSError as exc: job.diagnostic_tail.append(f"Ошибка записи лога: {exc}")
+
+    def _run_postprocess(self, job: DownloadJob, command: list[str], capture: bool = False) -> tuple[int, bytes]:
+        if job.cancel_event.is_set(): raise RuntimeError("остановлено")
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0  # type: ignore[attr-defined]
+        process = self._popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False, creationflags=flags)
+        job.process = process; self._publish(job, "Постобработка")
+        output = bytearray(); assert process.stdout is not None
+        try:
+            for raw in process.stdout:
+                output.extend(raw)
+                if not capture: self._safe_log(job, decode_process_output(raw).rstrip("\r\n"))
+            code = process.wait()
+            if job.cancel_event.is_set(): raise RuntimeError("остановлено")
+            return code, bytes(output)
+        finally:
+            try: process.stdout.close()
+            except OSError: pass
+            job.process = None
+
+    def _fix_section_start(self, job: DownloadJob, output: Path) -> None:
+        job.status = job.stage = "postprocessing"; self._publish(job, "Проверка ключевого кадра")
+        code, raw = self._run_postprocess(job, build_frame_probe_command(output), capture=True)
+        if code: raise RuntimeError(f"ffprobe завершился с кодом {code}")
+        timestamp, _ = find_first_decoded_keyframe(decode_process_output(raw))
+        if not needs_keyframe_trim(timestamp): return
+        assert timestamp is not None
+        command, temporary = build_keyframe_trim_command(output, timestamp); temporary.unlink(missing_ok=True)
+        code, _ = self._run_postprocess(job, command)
+        if code or not temporary.exists() or temporary.stat().st_size == 0:
+            temporary.unlink(missing_ok=True); raise RuntimeError(f"ffmpeg завершился с кодом {code}")
+        temporary.replace(output)
 
     def _progress(self, job: DownloadJob, value: str, attempt_id: str) -> None:
         if job.attempt_id != attempt_id: return
@@ -213,29 +286,22 @@ class ProcessManager:
 
     @staticmethod
     def _redact_args(args: list[str]) -> list[str]:
-        hidden = {"--proxy", "--cookies", "--add-header", "--username", "--password", "--video-password"}; result = list(args)
-        for i, arg in enumerate(result[:-1]):
-            if arg in hidden: result[i + 1] = "***"
-        if result:
-            from urllib.parse import urlsplit, urlunsplit
-            try:
-                parts = urlsplit(result[-1])
-                if parts.scheme and parts.query: result[-1] = urlunsplit((parts.scheme, parts.netloc, parts.path, "…", ""))
-            except ValueError: pass
-        return result
+        return redact_args(args)
 
     def _finish(self, job: DownloadJob, status: str, reason: str, output: str = "") -> None:
         job.status = job.stage = status; job.reason = reason; job.next_retry_at = ""; job.completed_at = datetime.now().isoformat(timespec="seconds")
         if output:
-            path = Path(output); job.result = {"file": output, "folder": str(path.parent), "size": path.stat().st_size, "preview_url": f"/api/media?path={quote(output)}"}
-        self._persist(); self.emit("job", reason, job.id, job=job.public())
-        add_history(HistoryEntry(id=job.id, job_id=job.id, datetime=job.completed_at, completed_at=job.completed_at, url=job.request.url, title=Path(output).stem if output else job.request.filename_template, download_dir=job.request.download_dir, output_file=output, mode=job.request.download_mode, format=job.request.selected_format, status=status, error="" if status == "success" else reason, reason=reason, filename_template=job.request.filename_template, quality_key=quality_key(job.request), size=job.result.get("size", 0), attempts=job.attempts, request_snapshot=job.request.model_dump()))
+            path = Path(output); suffix = path.suffix.lower(); preview = "video" if suffix in {".mp4", ".webm", ".ogg", ".mov", ".m4v"} else "audio" if suffix in {".mp3", ".m4a", ".opus", ".wav", ".oga"} else ""
+            job.result = {"file": output, "folder": str(path.parent), "size": path.stat().st_size, "status": "Готово", "preview_type": preview, "preview_url": f"/api/media?path={quote(output)}"}
+        self._publish(job, reason)
+        try: add_history(HistoryEntry(id=job.id, job_id=job.id, datetime=job.completed_at, completed_at=job.completed_at, url=job.request.url, title=Path(output).stem if output else job.request.filename_template, download_dir=job.request.download_dir, output_file=output, mode=job.request.download_mode, format=job.request.selected_format, status=status, error="" if status == "success" else reason, reason=reason, filename_template=job.request.filename_template, quality_key=quality_key(job.request), size=job.result.get("size", 0), attempts=job.attempts, request_snapshot=job.request.model_dump()))
+        except Exception as exc: self._safe_log(job, f"Не удалось записать историю: {exc}")
 
     def retry(self, job_id: str) -> bool:
         job = self.jobs.get(job_id)
-        if not job or job.status not in {"error", "interrupted", "retry_wait"}: return False
+        if not job or job.status not in {"error", "interrupted", "retry_wait", "stopped"}: return False
         if job.status == "retry_wait": job.retry_now.set(); return True
-        job.cancel_event.clear(); job.retry_now.clear(); job.status = "queued"; threading.Thread(target=self._worker, args=(job,), daemon=True).start(); return True
+        job.cancel_event.clear(); job.retry_now.clear(); job.status = job.stage = "queued"; self._publish(job, "Продолжение добавлено в очередь"); threading.Thread(target=self._worker, args=(job,), daemon=True).start(); return True
 
     def stop(self, job_id: str = "") -> bool:
         targets = [self.jobs[job_id]] if job_id in self.jobs else list(self.jobs.values()) if not job_id else []; changed = False
@@ -258,7 +324,7 @@ class ProcessManager:
             try: process.wait(timeout=5)
             except subprocess.TimeoutExpired: pass
         finally:
-            if process.stdout: process.stdout.close()
+            pass  # the reader owns and closes stdout after the process exits
 
     def shutdown(self) -> None:
         self.stop(); self._persist()

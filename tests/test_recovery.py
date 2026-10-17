@@ -4,7 +4,7 @@ import pytest
 
 from app.models import DownloadRequest
 from app.recovery import classify_failure, retry_delay
-from app.ytdlp_service import _split_windows_commandline, build_download_command
+from app.ytdlp_service import _split_windows_commandline, build_download_command, parse_formats_metadata, redact_args, redact_diagnostic_text
 
 
 def test_error_classification_uses_terminal_tail_and_policies():
@@ -40,3 +40,27 @@ def test_retry_command_keeps_stable_output_and_drops_force_overwrite(monkeypatch
     assert "--continue" in retry and "--part" in retry and "--ignore-config" in retry
     assert retry[-1] == request.url
     assert retry[retry.index("-o") + 1] == first[first.index("-o") + 1]
+    assert "--progress" in retry and "--no-quiet" in retry
+
+
+def test_strict_metadata_is_compact_and_rejects_invalid_json():
+    raw = '{"id":"sample","title":"Русское имя","formats":[{"format_id":"v1","ext":"mp4","vcodec":"avc1","acodec":"none","fps":30,"filesize_approx":123,"url":"https://cdn.test/secret?token=x"},{"format_id":"a1","ext":"m4a","vcodec":"none","acodec":"aac","language":"ru","format_note":"Русская дорожка"}]}'
+    items, diagnostic = parse_formats_metadata(raw)
+    assert [item.kind for item in items] == ["video", "audio"]
+    assert items[1].audio_name == "Русская дорожка"
+    assert items[0].approximate is True and items[1].approximate is False
+    assert all("cdn.test" not in item.model_dump_json() for item in items)
+    assert diagnostic == {"id": "sample", "title": "Русское имя", "format_count": 2}
+    with pytest.raises(ValueError, match="JSON"):
+        parse_formats_metadata('{"id":"sample","formats":[')
+    with pytest.raises(ValueError, match="format_id"):
+        parse_formats_metadata('{"formats":[{"ext":"mp4"}]}')
+
+
+def test_redaction_supports_separate_and_equals_forms_without_mutation():
+    original = ["yt-dlp", "--proxy", "http://user:pass@proxy", "--password=secret", "https://site.test/watch?v=1&token=x"]
+    safe = redact_args(original)
+    assert original[2] == "http://user:pass@proxy" and original[3] == "--password=secret"
+    assert safe[2] == "***" and safe[3] == "--password=***" and safe[-1].endswith("?…")
+    diagnostic = redact_diagnostic_text("--password secret token=abc https://cdn.test/a?token=abc")
+    assert "secret" not in diagnostic and "abc" not in diagnostic
