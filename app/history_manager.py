@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 from app.models import HistoryEntry
 from app.path_utils import HISTORY_PATH, ensure_project_dirs
+from app.json_store import atomic_write, read, update
 
 MAX_HISTORY_ITEMS = 300
 
@@ -12,14 +12,13 @@ def load_history() -> list[HistoryEntry]:
     if not HISTORY_PATH.exists():
         save_history([])
         return []
-    try:
-        data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = []
+    data = read(HISTORY_PATH, {"schema_version": 2, "items": []})
+    if isinstance(data, dict): data = data.get("items", [])
     entries: list[HistoryEntry] = []
     for item in data if isinstance(data, list) else []:
         try:
-            entries.append(HistoryEntry(**item))
+            migrated = dict(item); migrated.setdefault("incomplete", not bool(item.get("request_snapshot")))
+            entries.append(HistoryEntry(**migrated))
         except Exception:
             continue
     return entries
@@ -27,16 +26,15 @@ def load_history() -> list[HistoryEntry]:
 
 def save_history(entries: list[HistoryEntry]) -> None:
     ensure_project_dirs()
-    HISTORY_PATH.write_text(
-        json.dumps([entry.model_dump() for entry in entries[:MAX_HISTORY_ITEMS]], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write(HISTORY_PATH, {"schema_version": 2, "items": [entry.model_dump() for entry in entries[:MAX_HISTORY_ITEMS]]})
 
 
 def add_history(entry: HistoryEntry) -> None:
-    entries = load_history()
-    entries.insert(0, entry)
-    save_history(entries)
+    def add(data):
+        items = data if isinstance(data, list) else data.get("items", [])
+        items = [item for item in items if item.get("job_id") != entry.job_id or not entry.job_id]
+        return {"schema_version": 2, "items": [entry.model_dump(), *items][:MAX_HISTORY_ITEMS]}
+    update(HISTORY_PATH, {"schema_version": 2, "items": []}, add)
 
 
 def clear_history() -> None:
