@@ -11,16 +11,15 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config_manager import load_config, save_config
 from app.history_manager import clear_history, load_history
+from app.json_store import notices
 from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathRequest, OutputConflictRequest, ToolActionRequest
 from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path, sanitize_filename_template
 from app.process_manager import ProcessManager
 from app.text_utils import decode_process_output
-from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats, quality_key, quote_command, suggest_non_conflicting_filename, template_name_from_path
+from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats_metadata, quote_command, redact_args, suggest_non_conflicting_filename, template_name_from_path
 
 app = FastAPI(title="Local yt-dlp Manager")
 manager = ProcessManager()
-event_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=500)
-manager.set_event_queue(event_queue)
 
 
 def _is_windows_client_disconnect(context: dict) -> bool:
@@ -73,14 +72,18 @@ def _probe_output_path(request: DownloadRequest) -> tuple[Path | None, str, str]
 async def startup() -> None:
     loop = asyncio.get_running_loop()
     _install_client_disconnect_exception_filter(loop)
-    manager.set_event_queue(event_queue, loop)
-    load_config()
+    manager.configure(load_config().max_concurrent)
     environment_status(include_versions=False)
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    manager.shutdown()
 
 
 @app.get("/api/config")
 def get_config() -> dict:
-    return {"config": load_config().model_dump()}
+    return {"config": load_config().model_dump(), "notices": notices()}
 
 
 @app.post("/api/config")
@@ -121,7 +124,8 @@ def impersonate_targets() -> dict:
 def get_formats(request: FormatRequest) -> dict:
     try:
         command = build_format_command(request)
-        manager.emit("log", f"Команда запроса форматов: {quote_command(command)}")
+        safe_command = quote_command(redact_args(command))
+        manager.emit("log", f"Команда запроса форматов: {safe_command}")
         completed = subprocess.run(
             command,
             capture_output=True,
@@ -130,16 +134,23 @@ def get_formats(request: FormatRequest) -> dict:
         )
         stdout = decode_process_output(completed.stdout or b"")
         stderr = decode_process_output(completed.stderr or b"")
-        raw_output = stdout + stderr
-        for line in raw_output.splitlines():
-            manager.emit("log", line)
+        if completed.returncode != 0:
+            diagnostic = "\n".join(stderr.splitlines()[-40:])
+            return {"success": False, "formats": [], "diagnostic": {}, "stderr": diagnostic,
+                    "command": safe_command, "error": f"yt-dlp metadata завершился с кодом {completed.returncode}: {diagnostic}"}
+        formats, diagnostic = parse_formats_metadata(stdout)
         return {
-            "success": completed.returncode == 0,
-            "formats": [item.model_dump() for item in parse_formats(raw_output)],
-            "raw_output": raw_output,
-            "command": quote_command(command),
-            "error": "" if completed.returncode == 0 else f"yt-dlp -F завершился с кодом {completed.returncode}",
+            "success": True,
+            "formats": [item.model_dump(exclude={"raw"}) for item in formats],
+            "diagnostic": diagnostic,
+            "command": safe_command,
+            "stderr": "\n".join(stderr.splitlines()[-40:]),
+            "error": "",
         }
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail={"code": "formats_timeout", "message": "yt-dlp не ответил за 120 секунд"}) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail={"code": "tool_unavailable", "message": str(exc)}) from exc
     except ValueError as exc:
         manager.emit("log", f"Ошибка запроса форматов: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -179,24 +190,8 @@ def output_conflict(request: OutputConflictRequest) -> dict:
 @app.post("/api/download")
 def start_download(request: DownloadRequest) -> dict:
     try:
-        previous = next((item for item in load_history() if item.url == request.url and item.status in {"stopped", "error"}), None)
-        if request.resume_downloads and request.resume_policy == "ask" and previous:
-            same_quality = previous.quality_key == quality_key(request) if previous.quality_key else previous.format == (request.selected_format if request.download_mode == "manual" else request.download_mode)
-            old_name = previous.filename_template or previous.title
-            if not same_quality or old_name != request.filename_template:
-                return {"success": False, "resume_conflict": True, "same_quality": same_quality,
-                        "old_name": old_name, "new_name": request.filename_template,
-                        "old_mode": previous.mode, "old_format": previous.format,
-                        "message": "Найдена незавершённая попытка для этой ссылки"}
-        if request.resume_policy == "restart" and previous:
-            # Remove only temporary yt-dlp artefacts associated with the prior
-            # user-supplied name. Completed media files are never deleted here.
-            old_name = sanitize_filename_template(previous.filename_template or previous.title)
-            directory = resolve_user_path(previous.download_dir, None)
-            if old_name and directory.exists():
-                for partial in directory.glob(f"{old_name}.*.part*"):
-                    if partial.is_file():
-                        partial.unlink(missing_ok=True)
+        # Existing artifacts are never globbed or deleted. A restart is a new
+        # logical job; continuation of a persisted job uses /retry and its manifest.
         if request.conflict_policy in {"ask", "rename"}:
             path, raw_output, command = _probe_output_path(request)
             if path is not None and path.exists():
@@ -228,9 +223,26 @@ def stop_download(job_id: str = "") -> dict:
     return {"success": stopped, "message": "Download process stopped" if stopped else "Нет активной загрузки"}
 
 
+@app.post("/api/download/retry")
+def retry_download(job_id: str) -> dict:
+    success = manager.retry(job_id)
+    return {"success": success, "message": "Повтор запрошен" if success else "Повтор сейчас недоступен"}
+
+
 @app.get("/api/logs")
 def get_logs() -> dict:
     return manager.get_logs()
+
+
+@app.get("/api/jobs")
+def jobs() -> dict:
+    return manager.snapshot()
+
+
+@app.get("/api/jobs/{job_id}/log")
+def job_log(job_id: str, limit: int = 300, offset: int = 0) -> dict:
+    if job_id not in manager.jobs: raise HTTPException(status_code=404, detail="Задание не найдено")
+    return {"job_id": job_id, **manager.log_tail(job_id, limit, offset)}
 
 
 @app.post("/api/logs/clear")
@@ -242,9 +254,15 @@ def clear_logs() -> dict:
 @app.get("/api/events")
 async def events() -> StreamingResponse:
     async def stream():
-        while True:
-            event = await event_queue.get()
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        key, queue = manager.broker.subscribe(asyncio.get_running_loop())
+        try:
+            yield f"event: snapshot\ndata: {json.dumps(manager.snapshot(), ensure_ascii=False)}\n\n"
+            while True:
+                try: event = await asyncio.wait_for(queue.get(), timeout=20)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"; continue
+                yield f"id: {event['event_id']}\nevent: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally: manager.broker.unsubscribe(key)
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 

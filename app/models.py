@@ -12,6 +12,7 @@ ResumePolicy = Literal["ask", "continue", "restart"]
 
 
 class AppConfig(BaseModel):
+    schema_version: int = 2
     last_url: str = ""
     download_dir: str = "Downloads"
     filename_template: str = ""
@@ -32,6 +33,11 @@ class AppConfig(BaseModel):
     selected_format: str = ""
     extra_args: str = ""
     resume_downloads: bool = True
+    auto_retry: bool = True
+    max_restarts: int = Field(default=5, ge=0, le=10)
+    socket_timeout: int = Field(default=30, ge=1, le=600)
+    http_chunk_size: str = ""
+    max_concurrent: int = Field(default=2, ge=1, le=8)
 
 
 class FormatRequest(BaseModel):
@@ -66,7 +72,13 @@ class FormatItem(BaseModel):
     size: str = ""
     size_bytes: int = 0
     note: str = ""
-    raw: str
+    audio_name: str = ""
+    raw: str = ""
+    protocol: str = ""
+    language: str = ""
+    dynamic_range: str = ""
+    kind: str = "unknown"
+    approximate: bool = False
 
 
 class HistoryEntry(BaseModel):
@@ -82,6 +94,14 @@ class HistoryEntry(BaseModel):
     error: str = ""
     filename_template: str = ""
     quality_key: str = ""
+    schema_version: int = 2
+    job_id: str = ""
+    completed_at: str = ""
+    size: int = 0
+    reason: str = ""
+    attempts: list[dict] = Field(default_factory=list)
+    request_snapshot: dict = Field(default_factory=dict)
+    incomplete: bool = False
 
 
 class OpenPathRequest(BaseModel):
