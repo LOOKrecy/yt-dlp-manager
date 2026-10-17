@@ -126,7 +126,8 @@
       <div class="card">
         <h2>Загрузки <button type="button" class="help" data-help="Карточки заданий и диагностический хвост выбранного задания.">?</button></h2>
         <div id="jobsList" class="jobs-list"><p>Загрузок пока нет.</p></div>
-        <label>Итоговая команда <input id="commandLine" readonly></label>
+        <label>Команда выбранной попытки загрузки <input id="commandLine" readonly></label>
+        <p id="selectedLogMeta">Задание для просмотра лога не выбрано.</p>
         <div class="actions">
           <button id="copyCommandBtn">Копировать команду</button>
           <button id="copyLogBtn">Копировать лог</button>
@@ -200,7 +201,7 @@
         </div>
         <div class="table-wrap formats-table-wrap">
           <table>
-            <thead><tr><th>Выбор</th><th>Код</th><th>Расширение</th><th>Разрешение</th><th>FPS</th><th>Видео</th><th>Аудио</th><th>Размер</th><th>Примечание</th><th>Исходная строка</th></tr></thead>
+            <thead><tr><th>Тип</th><th>ID</th><th>Контейнер</th><th>Разрешение/FPS</th><th>Кодеки</th><th>Язык/дорожка</th><th>Протокол</th><th>Размер</th></tr></thead>
             <tbody id="formatsBody"></tbody>
           </table>
         </div>
@@ -208,7 +209,10 @@
         <div class="actions">
           <button id="useFormatBtn" class="primary">Использовать выбранный формат</button>
         </div>
-        <pre id="rawFormats" class="raw-output"></pre>
+        <details><summary>Диагностика получения форматов</summary>
+          <label>Команда получения форматов <input id="formatCommandLine" readonly></label>
+          <pre id="rawFormats" class="raw-output"></pre>
+        </details>
       </div>
     </div>
   </div>

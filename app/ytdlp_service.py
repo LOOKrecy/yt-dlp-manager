@@ -4,6 +4,7 @@ import json
 import subprocess
 import re
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from app.models import DownloadRequest, FormatItem, FormatRequest
 from app.path_utils import FFMPEG_PATH, FFPROBE_PATH, YT_DLP_PATH, build_output_template, ensure_writable_directory, find_deno_path, resolve_user_path
 
@@ -197,6 +198,34 @@ def build_download_command(request: DownloadRequest, attempt: int = 1, output_te
     args.extend(split_extra_args(request.extra_args))
     args.append(request.url.strip())
     return args
+
+
+def parse_formats_metadata(raw_output: str) -> tuple[list[FormatItem], dict]:
+    """Strictly parse --dump-single-json output into a URL-free public DTO."""
+    try:
+        metadata = json.loads(raw_output)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"yt-dlp вернул некорректные JSON-метаданные: {exc.msg}") from exc
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("formats"), list):
+        raise ValueError("yt-dlp вернул метаданные без массива formats")
+    result: list[FormatItem] = []
+    for index, item in enumerate(metadata["formats"]):
+        if not isinstance(item, dict):
+            raise ValueError(f"Некорректный элемент formats[{index}]")
+        format_id = item.get("format_id")
+        if not isinstance(format_id, (str, int)) or not str(format_id).strip():
+            raise ValueError(f"В formats[{index}] отсутствует format_id")
+        for key in ("filesize", "filesize_approx", "fps"):
+            if item.get(key) is not None and not isinstance(item[key], (int, float)):
+                raise ValueError(f"Поле formats[{index}].{key} должно быть числом")
+        v, a = item.get("vcodec") or "none", item.get("acodec") or "none"
+        kind = "muxed" if v != "none" and a != "none" else "video" if v != "none" else "audio" if a != "none" else "unknown"
+        exact, estimate = item.get("filesize"), item.get("filesize_approx")
+        size = exact if exact is not None else estimate
+        result.append(FormatItem(format_id=str(format_id), extension=str(item.get("ext") or ""), resolution=str(item.get("resolution") or ""), fps=str(item.get("fps") or ""), video=str(v), audio=str(a), size_bytes=int(size or 0), note=str(item.get("format_note") or ""), audio_name=str(item.get("format") or item.get("format_note") or ""), protocol=str(item.get("protocol") or ""), language=str(item.get("language") or ""), dynamic_range=str(item.get("dynamic_range") or ""), kind=kind, approximate=exact is None and estimate is not None))
+    diagnostic = {key: metadata.get(key) for key in ("id", "title", "extractor", "duration", "webpage_url_domain") if metadata.get(key) is not None}
+    diagnostic["format_count"] = len(result)
+    return result, diagnostic
 
 
 def parse_formats(raw_output: str) -> list[FormatItem]:

@@ -16,7 +16,7 @@ from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathReques
 from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path, sanitize_filename_template
 from app.process_manager import ProcessManager
 from app.text_utils import decode_process_output
-from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats, quality_key, quote_command, suggest_non_conflicting_filename, template_name_from_path
+from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats_metadata, quote_command, redact_args, suggest_non_conflicting_filename, template_name_from_path
 
 app = FastAPI(title="Local yt-dlp Manager")
 manager = ProcessManager()
@@ -124,7 +124,8 @@ def impersonate_targets() -> dict:
 def get_formats(request: FormatRequest) -> dict:
     try:
         command = build_format_command(request)
-        manager.emit("log", f"Команда запроса форматов: {quote_command(command)}")
+        safe_command = quote_command(redact_args(command))
+        manager.emit("log", f"Команда запроса форматов: {safe_command}")
         completed = subprocess.run(
             command,
             capture_output=True,
