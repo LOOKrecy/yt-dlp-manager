@@ -24,7 +24,7 @@
 
   <nav class="tabs" aria-label="Разделы">
     <button class="tab active" data-tab="download">Загрузка</button>
-    <button class="tab" data-tab="logs">Логи</button>
+    <button class="tab" data-tab="logs">Загрузки</button>
     <button class="tab" data-tab="result">Результат</button>
     <button class="tab" data-tab="history">История</button>
     <button class="tab" data-tab="settings">Настройки</button>
@@ -73,6 +73,18 @@
         </div>
       </div>
 
+      <details class="card">
+        <summary><strong>Восстановление и сеть</strong></summary>
+        <label><input id="auto_retry" type="checkbox" checked> Автоматически повторять временные ошибки</label>
+        <div class="grid two compact">
+          <label>Перезапусков <input id="max_restarts" type="number" min="0" max="10" value="5"></label>
+          <label>Socket timeout, с <input id="socket_timeout" type="number" min="1" max="600" value="30"></label>
+        </div>
+        <label>HTTP chunk size (по умолчанию выключен) <input id="http_chunk_size" type="text" placeholder="например 5M"></label>
+        <p>Chunk size помогает не всем протоколам и требует поддержки HTTP Range. Для DASH/HLS, внешнего ffmpeg и загрузки фрагментов побайтовая докачка не гарантируется.</p>
+        <label>Одновременных заданий <input id="max_concurrent" type="number" min="1" max="8" value="2"></label>
+      </details>
+
       <div class="grid two">
         <div class="card">
           <h2>Доступ <button type="button" class="help" data-help="Настройки сети и авторизации для сайтов, где нужен proxy, cookies или browser impersonation.">?</button></h2>
@@ -112,7 +124,7 @@
 
     <section id="logs" class="panel">
       <div class="card">
-        <h2>Логи <button type="button" class="help" data-help="Поток сообщений yt-dlp и backend. Блок ограничен по высоте и прокручивается внутри.">?</button></h2>
+        <h2>Загрузки <button type="button" class="help" data-help="Карточки заданий и диагностический хвост выбранного задания.">?</button></h2>
         <div id="jobsList" class="jobs-list"><p>Загрузок пока нет.</p></div>
         <label>Итоговая команда <input id="commandLine" readonly></label>
         <div class="actions">

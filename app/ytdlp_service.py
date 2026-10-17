@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import shlex
+import json
+import subprocess
 import re
 from pathlib import Path
 from app.models import DownloadRequest, FormatItem, FormatRequest
@@ -10,16 +11,48 @@ FALLBACK_IMPERSONATE_TARGETS = ["chrome", "chrome-110", "chrome-120", "edge", "s
 
 
 def quote_command(args: list[str]) -> str:
-    return " ".join(shlex.quote(str(arg)) for arg in args)
+    """Human CMD approximation. JSON argv remains the authoritative diagnostic."""
+    return subprocess.list2cmdline([str(arg) for arg in args])
 
 
 def split_extra_args(extra_args: str) -> list[str]:
     if not (extra_args or "").strip():
         return []
     try:
-        return shlex.split(extra_args)
+        # CommandLineToArgvW-compatible parsing without invoking cmd.exe.
+        return _split_windows_commandline(extra_args)
     except ValueError as exc:
         raise ValueError(f"Не удалось разобрать дополнительные параметры: {exc}") from exc
+
+
+def _split_windows_commandline(command: str) -> list[str]:
+    result: list[str] = []; current: list[str] = []; quoted = False; slashes = 0; i = 0
+    while i < len(command):
+        char = command[i]
+        if char == "\\": slashes += 1; i += 1; continue
+        if char == '"':
+            current.extend("\\" * (slashes // 2))
+            if slashes % 2: current.append('"')
+            else: quoted = not quoted
+            slashes = 0; i += 1; continue
+        current.extend("\\" * slashes); slashes = 0
+        if char.isspace() and not quoted:
+            if current: result.append("".join(current)); current = []
+        else: current.append(char)
+        i += 1
+    current.extend("\\" * slashes)
+    if quoted: raise ValueError("незакрытая двойная кавычка")
+    if current: result.append("".join(current))
+    _reject_conflicting_args(result)
+    return result
+
+
+def _reject_conflicting_args(args: list[str]) -> None:
+    forbidden = {"--no-continue", "--no-part", "--force-overwrites", "--no-progress", "--exec", "-o", "--output", "-p", "-P", "--paths", "--print", "--progress-template", "--playlist-items", "--yes-playlist", "--max-downloads"}
+    for arg in args:
+        name = arg.split("=", 1)[0]
+        if name in forbidden or (name.startswith("-o") and name != "--") or (name.startswith("-P") and name != "--"):
+            raise ValueError(f"Параметр {name} запрещён: он нарушает гарантии докачки и диагностики")
 
 
 def validate_access_args(request: FormatRequest | DownloadRequest) -> None:
@@ -133,7 +166,7 @@ def build_format_command(request: FormatRequest) -> list[str]:
     validate_access_args(request)
     if not YT_DLP_PATH.exists():
         raise ValueError("yt-dlp.exe не найден в папке bin")
-    args = [str(YT_DLP_PATH), "-F"]
+    args = [str(YT_DLP_PATH), "--ignore-config", "--dump-single-json", "--skip-download", "--no-playlist"]
     add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     args.extend(split_extra_args(request.extra_args))
@@ -141,29 +174,44 @@ def build_format_command(request: FormatRequest) -> list[str]:
     return args
 
 
-def build_download_command(request: DownloadRequest) -> list[str]:
+def build_download_command(request: DownloadRequest, attempt: int = 1, output_template: str = "") -> list[str]:
     validate_download_request(request)
-    args = [str(YT_DLP_PATH)]
+    args = [str(YT_DLP_PATH), "--ignore-config", "--no-playlist", "--newline", "--part", "--socket-timeout", str(request.socket_timeout), "--retries", "3", "--fragment-retries", "3", "--retry-sleep", "http:3", "--retry-sleep", "fragment:3"]
     # yt-dlp resumes matching .part files by default.  Keep this explicit so a
     # user's extra arguments cannot make the manager's option ambiguous.
-    args.extend(["--continue", "--newline"] if request.resume_downloads and request.resume_policy != "restart" else ["--no-continue", "--no-part"])
+    args.append("--continue")
     add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     add_download_mode_args(args, request)
     add_section_args(args, request)
 
-    if request.conflict_policy == "overwrite":
+    if request.conflict_policy == "overwrite" and attempt == 1:
         args.append("--force-overwrites")
+    if request.http_chunk_size:
+        args.extend(["--http-chunk-size", request.http_chunk_size])
 
     download_dir = ensure_writable_directory(request.download_dir)
-    args.extend(["-o", build_output_template(download_dir, request.filename_template)])
-    args.extend(["--print", "after_move:filepath"])
+    args.extend(["-o", output_template or build_output_template(download_dir, request.filename_template)])
+    args.extend(["--progress-template", "download:__YTM_PROGRESS__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s|%(info.format_id)s"])
+    args.extend(["--print", "after_move:__YTM_RESULT__%(filepath)s"])
     args.extend(split_extra_args(request.extra_args))
     args.append(request.url.strip())
     return args
 
 
 def parse_formats(raw_output: str) -> list[FormatItem]:
+    try:
+        metadata = json.loads(raw_output)
+    except json.JSONDecodeError:
+        metadata = None
+    if isinstance(metadata, dict):
+        result = []
+        for item in metadata.get("formats", []):
+            v, a = item.get("vcodec") or "none", item.get("acodec") or "none"
+            kind = "muxed" if v != "none" and a != "none" else "video" if v != "none" else "audio" if a != "none" else "unknown"
+            size = item.get("filesize") or item.get("filesize_approx") or 0
+            result.append(FormatItem(format_id=str(item.get("format_id", "")), extension=item.get("ext") or "", resolution=item.get("resolution") or "", fps=str(item.get("fps") or ""), video=v, audio=a, size_bytes=int(size), note=item.get("format_note") or "", protocol=item.get("protocol") or "", language=item.get("language") or "", dynamic_range=item.get("dynamic_range") or "", kind=kind, approximate=not bool(item.get("filesize")), raw=json.dumps(item, ensure_ascii=False)))
+        return result
     formats: list[FormatItem] = []
     for line in raw_output.splitlines():
         raw = line.rstrip()

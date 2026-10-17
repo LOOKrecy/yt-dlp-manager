@@ -52,34 +52,21 @@ if not exist "%VENV_PIP%" (
   exit /b 1
 )
 
-echo Upgrading pip inside the local virtual environment only...
-"%VENV_PYTHON%" -m pip install --upgrade pip
+"%VENV_PYTHON%" -c "import hashlib,pathlib,sys;p=pathlib.Path('requirements.txt');m=pathlib.Path('.venv/.requirements.sha256');sys.exit(0 if m.exists() and m.read_text()==hashlib.sha256(p.read_bytes()).hexdigest() else 1)"
 if errorlevel 1 (
-  echo ERROR: Failed to upgrade pip inside %CD%\%VENV_DIR%.
-  echo No global Python installation was modified.
-  pause
-  popd >nul 2>&1
-  exit /b 1
+  echo Installing changed requirements inside the local virtual environment only...
+  "%VENV_PIP%" install -r requirements.txt
+  if errorlevel 1 (
+    echo ERROR: Failed to install requirements into %CD%\%VENV_DIR%.
+    pause
+    popd >nul 2>&1
+    exit /b 1
+  )
+  "%VENV_PYTHON%" -c "import hashlib,pathlib;p=pathlib.Path('requirements.txt');pathlib.Path('.venv/.requirements.sha256').write_text(hashlib.sha256(p.read_bytes()).hexdigest())"
 )
 
-echo Installing requirements inside the local virtual environment only...
-"%VENV_PIP%" install -r requirements.txt
-if errorlevel 1 (
-  echo ERROR: Failed to install requirements into %CD%\%VENV_DIR%.
-  echo No global Python installation was modified.
-  pause
-  popd >nul 2>&1
-  exit /b 1
-)
-
-if exist "bin\yt-dlp.exe" (
-  echo Checking for yt-dlp updates...
-  "bin\yt-dlp.exe" -U
-  if errorlevel 1 echo WARNING: yt-dlp update check failed; starting with the installed version.
-)
-
-echo Opening %APP_URL% ...
-start "" "%APP_URL%"
+rem Open only after the manager answers its localhost health/config endpoint.
+start "yt-dlp-manager browser" /b powershell -NoProfile -Command "$u='%APP_URL%/api/config'; 1..60 | %% { try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 $u ^| Out-Null; Start-Process '%APP_URL%'; exit } catch { Start-Sleep -Milliseconds 500 } }"
 
 echo Starting Local yt-dlp Manager with %CD%\%VENV_PYTHON% ...
 "%VENV_PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port 8765
