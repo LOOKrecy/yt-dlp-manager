@@ -134,18 +134,16 @@ def get_formats(request: FormatRequest) -> dict:
         )
         stdout = decode_process_output(completed.stdout or b"")
         stderr = decode_process_output(completed.stderr or b"")
-        if completed.returncode != 0:
-            diagnostic = "\n".join(stderr.splitlines()[-40:])
-            return {"success": False, "formats": [], "diagnostic": {}, "stderr": diagnostic,
-                    "command": safe_command, "error": f"yt-dlp metadata завершился с кодом {completed.returncode}: {diagnostic}"}
-        formats, diagnostic = parse_formats_metadata(stdout)
+        raw_output = stdout
+        for line in raw_output.splitlines():
+            manager.emit("log", line)
         return {
-            "success": True,
-            "formats": [item.model_dump(exclude={"raw"}) for item in formats],
-            "diagnostic": diagnostic,
-            "command": safe_command,
-            "stderr": "\n".join(stderr.splitlines()[-40:]),
-            "error": "",
+            "success": completed.returncode == 0,
+            "formats": [item.model_dump() for item in parse_formats(raw_output)],
+            "raw_output": raw_output,
+            "command": quote_command(command),
+            "stderr": stderr,
+            "error": "" if completed.returncode == 0 else f"yt-dlp metadata завершился с кодом {completed.returncode}",
         }
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=504, detail={"code": "formats_timeout", "message": "yt-dlp не ответил за 120 секунд"}) from exc
@@ -240,9 +238,9 @@ def jobs() -> dict:
 
 
 @app.get("/api/jobs/{job_id}/log")
-def job_log(job_id: str, limit: int = 300, offset: int = 0) -> dict:
+def job_log(job_id: str, limit: int = 300) -> dict:
     if job_id not in manager.jobs: raise HTTPException(status_code=404, detail="Задание не найдено")
-    return {"job_id": job_id, **manager.log_tail(job_id, limit, offset)}
+    return {"job_id": job_id, "lines": manager.log_tail(job_id, limit)}
 
 
 @app.post("/api/logs/clear")
