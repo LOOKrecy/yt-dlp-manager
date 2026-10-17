@@ -4,3 +4,6 @@ __pycache__/
 .venv/
 venv/
 data/config.json
+data/jobs.json
+data/*.corrupt-*
+logs/*.log
