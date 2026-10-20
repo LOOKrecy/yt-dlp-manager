@@ -14,7 +14,7 @@ from app.history_manager import clear_history, load_history
 from app.json_store import notices
 from app.models import AppConfig, DownloadRequest, FormatRequest, OpenPathRequest, OutputConflictRequest, ToolActionRequest
 from app.path_utils import DENO_PATH, FFMPEG_PATH, STATIC_DIR, YT_DLP_PATH, environment_status, find_deno_path, open_with_system, resolve_user_path, sanitize_filename_template
-from app.process_manager import ProcessManager
+from app.process_manager import DownloadConflict, ProcessManager
 from app.text_utils import decode_process_output
 from app.ytdlp_service import FALLBACK_IMPERSONATE_TARGETS, build_format_command, build_output_probe_command, parse_formats_metadata, quote_command, redact_args, redact_diagnostic_text, suggest_non_conflicting_filename, template_name_from_path
 
@@ -212,6 +212,8 @@ def start_download(request: DownloadRequest) -> dict:
         save_config(config)
         job_id = manager.start_download(request)
         return {"success": True, "job_id": job_id, "conflict": False}
+    except DownloadConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     except ValueError as exc:
         manager.emit("log", f"Ошибка запуска загрузки: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -225,7 +227,10 @@ def stop_download(job_id: str = "") -> dict:
 
 @app.post("/api/download/retry")
 def retry_download(job_id: str) -> dict:
-    success = manager.retry(job_id)
+    try:
+        success = manager.retry(job_id)
+    except DownloadConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     return {"success": success, "message": "Повтор запрошен" if success else "Повтор сейчас недоступен"}
 
 

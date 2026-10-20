@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ntpath
 import re
 import shutil
 import subprocess
@@ -152,3 +153,13 @@ def open_with_system(path: Path) -> None:
         subprocess.Popen(["open", str(path)], shell=False)
     else:
         subprocess.Popen(["xdg-open", str(path)], shell=False)
+
+
+def windows_path_key(value: str | Path) -> str:
+    """Canonical comparison key only; never rewrite persisted artifact paths."""
+    if os.name == "nt":
+        return ntpath.normcase(ntpath.abspath(str(value))).casefold()
+    text = str(value).replace("/", "\\")
+    if not ntpath.isabs(text):
+        text = ntpath.join(str(PROJECT_ROOT).replace("/", "\\"), text)
+    return ntpath.normcase(ntpath.normpath(text)).casefold()

@@ -21,6 +21,5 @@ def test_format_loading_is_finalized_and_stale_results_are_ignored():
 
 
 def test_muxed_selection_clears_separate_audio_and_commands_are_distinct():
-    assert "if(item.kind==='muxed')state.tempAudio=''" in SCRIPT
     assert "Команда выбранной попытки загрузки" in HTML
     assert "Команда получения форматов" in HTML

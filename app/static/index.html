@@ -194,7 +194,7 @@
       </div>
       <div id="formatsLoading" class="loading"><div class="spinner"></div><p>Запрашиваю доступные форматы…</p></div>
       <div id="formatsContent" class="hidden">
-        <p>Выберите мышью готовый формат или отдельно дорожки: кнопка «Видео» задаёт 1.4.1, кнопка «Аудио» задаёт 1.4.2. Если аудио не выбрано, будет использован только выбранный видео/готовый формат.</p>
+        <p>Выберите видео и аудио в любом порядке или один поток «Видео со звуком». Для неизвестного типа назначьте роль явно. Сложное выражение -f остаётся в экспертном режиме; точный состав потоков ещё не разрешён.</p>
         <div class="format-picker-summary">
           <div><strong>Видео/готовый:</strong> <span id="pickedVideoFormat">—</span></div>
           <div><strong>Аудио:</strong> <span id="pickedAudioFormat">—</span></div>
@@ -256,6 +256,7 @@
     </div>
   </div>
 
-  <script src="/app.js"></script>
+  <script src="/format_logic.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>

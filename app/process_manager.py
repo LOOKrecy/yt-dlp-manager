@@ -20,14 +20,20 @@ from app.history_manager import add_history
 from app.keyframe_fix import build_frame_probe_command, build_keyframe_trim_command, find_first_decoded_keyframe, needs_keyframe_trim
 from app.json_store import atomic_write, read
 from app.models import DownloadRequest, HistoryEntry
-from app.path_utils import JOBS_PATH, LOGS_DIR, build_output_template, ensure_project_dirs, ensure_writable_directory
+from app.path_utils import JOBS_PATH, LOGS_DIR, build_output_template, ensure_project_dirs, ensure_writable_directory, windows_path_key
 from app.recovery import Failure, classify_failure, retry_delay
 from app.text_utils import decode_process_output
-from app.ytdlp_service import build_download_command, quality_key, quote_command, redact_args
+from app.ytdlp_service import build_download_command, compatible_requests, explicit_format, suggest_non_conflicting_filename, quality_key, quote_command, redact_args
 
 ACTIVE = {"queued", "preparing", "downloading", "retry_wait", "postprocessing"}
 TERMINAL = {"stopped", "error", "success", "interrupted"}
 PROGRESS_RE = re.compile(r"\[download\]\s+(?P<percent>[\d.]+)%\s+of\s+(?P<size>.+?)(?:\s+in\s+(?P<elapsed>\S+))?(?:\s+at\s+(?P<speed>\S+))?\s*$")
+
+class DownloadConflict(ValueError):
+    def __init__(self, code: str, owner_job_id: str, actions: list[str], message: str):
+        super().__init__(message)
+        self.detail = {"code": code, "owner_job_id": owner_job_id, "actions": actions, "message": message}
+
 
 @dataclass
 class DownloadJob:
@@ -38,6 +44,10 @@ class DownloadJob:
     process: subprocess.Popen[bytes] | None = None
     attempt: int = 0
     attempt_id: str = ""
+    run_id: str = ""
+    worker_active: bool = False
+    resuming: bool = False
+    resolved_format: str = ""
     return_code: int | None = None
     reason: str = ""
     next_retry_at: str = ""
@@ -65,14 +75,14 @@ class DownloadJob:
                 "return_code": self.return_code, "reason": self.reason, "next_retry_at": self.next_retry_at,
                 "progress": self.progress, "downloaded_bytes": self.downloaded_bytes, "total_bytes": self.total_bytes,
                 "speed": self.speed, "eta": self.eta, "stream": self.stream, "stage": self.stage,
-                "result": dict(self.result), "running": self.process is not None and self.process.poll() is None,
+                "result": dict(self.result), "running": self.process is not None and self.process.poll() is None, "worker_active": self.worker_active,
                 "url": self.request.url, "filename": self.request.filename_template, "started_at": self.started_at,
                 "completed_at": self.completed_at, "attempts": list(self.attempts),
                 "command": self.command, "argv": list(self.argv), "last_message_at": self.last_message_at,
                 "access_summary": {"proxy": self.request.proxy_enabled, "cookies": self.request.cookies_enabled, "section": self.request.section_enabled}}
 
     def stored(self) -> dict[str, Any]:
-        data = self.public(); data["request"] = self.request.model_dump(); data["output_template"] = self.output_template; data["manifest"] = self.manifest
+        data = self.public(); data["request"] = self.request.model_dump(); data["output_template"] = self.output_template; data["manifest"] = self.manifest; data["resolved_format"] = self.resolved_format
         return data
 
 class EventBroker:
@@ -101,12 +111,12 @@ class EventBroker:
 class ProcessManager:
     def __init__(self, popen: Callable[..., subprocess.Popen] = subprocess.Popen, wait: Callable[[threading.Event, float], bool] | None = None) -> None:
         self.jobs: dict[str, DownloadJob] = {}; self._lock = threading.RLock(); self._popen = popen
-        self._wait = wait or (lambda event, seconds: event.wait(seconds)); self.broker = EventBroker(); self._reserved: dict[str, str] = {}
+        self._wait = wait or (lambda event, seconds: event.wait(seconds)); self.broker = EventBroker(); self._reserved: dict[str, tuple[str, str]] = {}; self._partial_owners: dict[str, str] = {}
         self._slots = threading.BoundedSemaphore(2); self._load_jobs()
 
     def configure(self, maximum: int) -> None:
         # Applied for new process lifetime; changing live semaphore would race active jobs.
-        if not any(j.status in ACTIVE for j in self.jobs.values()): self._slots = threading.BoundedSemaphore(maximum)
+        if not any(j.worker_active or j.status in ACTIVE for j in self.jobs.values()): self._slots = threading.BoundedSemaphore(maximum)
 
     def emit(self, kind: str, message: str, job_id: str = "", **payload: Any) -> None:
         event = {"type": kind, "message": message, "datetime": datetime.now().isoformat(timespec="seconds"), "job_id": job_id, **payload}
@@ -127,12 +137,13 @@ class ProcessManager:
                 request = DownloadRequest(**raw["request"]); status = raw.get("status", "interrupted")
                 if status in ACTIVE: status = "interrupted"
                 job = DownloadJob(raw["id"], request, raw["output_template"], status=status, attempt=raw.get("attempt", 0), reason="Работа backend была прервана" if status == "interrupted" else raw.get("reason", ""), result=raw.get("result", {}), attempts=raw.get("attempts", []), manifest=raw.get("manifest", []), started_at=raw.get("started_at", ""), completed_at=raw.get("completed_at", ""), command=raw.get("command", ""), argv=raw.get("argv", []), last_message_at=raw.get("last_message_at", ""))
-                self.jobs[job.id] = job; self._reserved[job.output_template.casefold()] = job.id
+                job.resolved_format = raw.get("resolved_format", "")
+                self.jobs[job.id] = job; self._partial_owners[windows_path_key(job.output_template)] = job.id
             except Exception: continue
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock: jobs = sorted((j.public() for j in self.jobs.values()), key=lambda x: x["started_at"], reverse=True)
-        return {"revision": self.broker.revision, "jobs": jobs, "running_count": sum(j["status"] in ACTIVE for j in jobs)}
+        return {"revision": self.broker.revision, "jobs": jobs, "running_count": sum(j["worker_active"] or j["status"] in ACTIVE for j in jobs)}
 
     def get_logs(self) -> dict[str, Any]: return self.snapshot()
     def log_tail(self, job_id: str, limit: int = 300, offset: int = 0) -> dict[str, Any]:
@@ -146,16 +157,93 @@ class ProcessManager:
         # Only clear the visible tails/files explicitly; job state is untouched.
         for job_id in list(self.jobs): (LOGS_DIR / f"{job_id}.log").unlink(missing_ok=True)
 
+    def _conflict(self, key: str, request: DownloadRequest, retry_job: DownloadJob | None = None, template: str = "") -> None:
+        active = self._reserved.get(key)
+        if active:
+            raise DownloadConflict("path_active", active[0], ["show_job"], "Путь занят активным заданием")
+        owner_id = self._partial_owners.get(key)
+        owner = self.jobs.get(owner_id or "")
+        if retry_job is not None:
+            if owner and owner.id != retry_job.id:
+                raise DownloadConflict("partial_incompatible", owner.id, ["rename"], "Артефакты пути уже принадлежат другому заданию; выберите новое имя")
+            output = self._existing_output(retry_job.output_template, request)
+            if output:
+                suggested = suggest_non_conflicting_filename(output)
+                conflict = DownloadConflict("output_exists", retry_job.id, ["rename"], "Готовый файл уже существует; выберите новое имя, чтобы сохранить его и partial")
+                conflict.detail.update(path=str(output), suggested_template=suggested.stem)
+                raise conflict
+            if retry_job.attempt and not (retry_job.resolved_format or
+                    (request.download_mode == "manual" and explicit_format(request.selected_format) and not request.extra_args.strip())):
+                raise DownloadConflict("selection_unresolved", retry_job.id, ["rename"], "Фактические потоки старого задания неизвестны; безопасная докачка не подтверждена. Выберите новое имя")
+        elif self._has_partial_artifacts(key, template) and (owner is None or owner.status == "success"):
+            raise DownloadConflict("partial_incompatible", owner.id if owner else "", ["rename"], "Найдены старые временные файлы без совместимого незавершённого задания; выберите новое имя")
+        elif owner and owner.status != "success":
+            compatible = compatible_requests(owner.request, request)
+            raise DownloadConflict("resume_available" if compatible else "partial_incompatible", owner.id,
+                                   ["resume", "rename"] if compatible else ["rename"],
+                                   "Продолжить существующее задание" if compatible else "Параметры старых partial несовместимы или выбор потоков не разрешён; выберите новое имя")
+
+    @staticmethod
+    def _existing_output(template: str, request: DownloadRequest) -> Path | None:
+        path = Path(template)
+        prefix = path.name.removesuffix("%(ext)s").casefold()
+        if not path.parent.exists():
+            return None
+        extensions = {request.audio_format} if request.download_mode == "audio" else {"mp4", "m4a", "mkv", "webm", "mp3", "opus", "wav", "ogg", "mov", "avi", "flac", "aac"}
+        for candidate in path.parent.iterdir():
+            name = candidate.name.casefold()
+            if (candidate.is_file() and name.startswith(prefix)
+                    and name[len(prefix):] in extensions):
+                return candidate
+        return None
+
+    def _has_partial_artifacts(self, key: str, candidate_template: str) -> bool:
+        # Compare keys, but always inspect original physical paths (including legacy jobs).
+        owner = self.jobs.get(self._partial_owners.get(key, ""))
+        template = owner.output_template if owner else candidate_template
+        if not template:
+            return False
+        path = Path(template)
+        prefix = path.name.removesuffix("%(ext)s").casefold()
+        return any(candidate.is_file() and candidate.name.casefold().startswith(prefix)
+                   and (candidate.name.casefold().endswith((".part", ".ytdl"))
+                        or re.match(r"f[^.]+\.", candidate.name[len(prefix):], re.IGNORECASE))
+                   for candidate in path.parent.iterdir()) if path.parent.exists() else False
+
+    def _claim(self, job: DownloadJob) -> str:
+        run_id = str(uuid.uuid4())
+        job.run_id = run_id; job.worker_active = True
+        self._reserved[windows_path_key(job.output_template)] = (job.id, run_id)
+        self._partial_owners[windows_path_key(job.output_template)] = job.id
+        return run_id
+
+    def _release(self, job: DownloadJob, run_id: str) -> None:
+        with self._lock:
+            key = windows_path_key(job.output_template)
+            if self._reserved.get(key) == (job.id, run_id):
+                del self._reserved[key]
+                job.worker_active = False
+
+    def _launch(self, job: DownloadJob) -> None:
+        try:
+            self._publish(job, "Добавлено в очередь")
+            threading.Thread(target=self._worker, args=(job,), daemon=True).start()
+        except Exception:
+            self._finish(job, "error", "Не удалось запустить рабочий поток")
+            self._release(job, job.run_id)
+            raise
+
     def start_download(self, request: DownloadRequest) -> str:
         ensure_project_dirs(); directory = ensure_writable_directory(request.download_dir)
         job_id = str(uuid.uuid4())
         if not request.filename_template: request = request.model_copy(update={"filename_template": f"download-{job_id[:8]}"})
-        template = build_output_template(directory, request.filename_template); key = template.casefold()
+        template = build_output_template(directory, request.filename_template); key = windows_path_key(template)
         with self._lock:
-            owner = self._reserved.get(key)
-            if owner and self.jobs.get(owner) and self.jobs[owner].status not in {"success"}: raise ValueError("Этот целевой путь уже зарезервирован другим заданием")
-            job = DownloadJob(job_id, request.model_copy(deep=True), template); self.jobs[job.id] = job; self._reserved[key] = job.id
-        self._persist(); self._publish(job, "Добавлено в очередь"); threading.Thread(target=self._worker, args=(job,), daemon=True).start(); return job.id
+            self._conflict(key, request, template=template)
+            job = DownloadJob(job_id, request.model_copy(deep=True), template)
+            self.jobs[job.id] = job; self._claim(job)
+        self._launch(job)
+        return job.id
 
     def _publish(self, job: DownloadJob, message: str) -> None:
         try:
@@ -165,14 +253,28 @@ class ProcessManager:
             self.broker.publish({"type": "job", "message": message, "job_id": job.id, "job": job.public()})
 
     def _worker(self, job: DownloadJob) -> None:
+        run_id = job.run_id
+        try:
+            self._worker_body(job)
+        finally:
+            # The worker and every subprocess must finish before another run can write.
+            if job.process is not None:
+                self._terminate(job)
+                job.process.wait()
+                job.process = None
+            self._release(job, run_id)
+            self._publish(job, job.reason)
+
+    def _worker_body(self, job: DownloadJob) -> None:
         with self._slots:
             try:
                 if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено до запуска")
                 cdn_refreshes = 0
+                budget_start = job.attempt
                 while True:
                     job.attempt += 1; job.attempt_id = str(uuid.uuid4()); current = job.attempt_id
                     job.status = job.stage = "preparing"; job.next_retry_at = ""; job.diagnostic_tail.clear(); self._publish(job, "Получение метаданных")
-                    args = build_download_command(job.request, job.attempt, job.output_template)
+                    args = build_download_command(job.request, max(2, job.attempt) if job.resuming else job.attempt, job.output_template, job.resolved_format)
                     safe_args = self._redact_args(args); job.argv = safe_args; job.command = quote_command(safe_args)
                     self._safe_log(job, f"=== attempt {job.attempt} ({current}) ===\nargv-json: {json.dumps(safe_args, ensure_ascii=False)}\ncmd-display (не для shell): {job.command}")
                     if job.cancel_event.is_set(): return self._finish(job, "stopped", "Остановлено до запуска")
@@ -194,7 +296,7 @@ class ProcessManager:
                             return self._finish(job, "success", "Готово", str(result_path))
                     assert failure is not None
                     job.reason = failure.message; job.return_code = code
-                    allowed = job.request.auto_retry and job.attempt <= job.request.max_restarts
+                    allowed = job.request.auto_retry and job.attempt - budget_start <= job.request.max_restarts
                     if failure.action == "refresh_once": allowed = allowed and cdn_refreshes < 1; cdn_refreshes += 1
                     elif failure.action not in {"retry", "retry_429"}: allowed = False
                     if not allowed: return self._finish(job, "error", failure.message)
@@ -209,14 +311,18 @@ class ProcessManager:
                 self._safe_log(job, reason)
                 self._finish(job, "stopped" if job.cancel_event.is_set() else "error", "Остановлено пользователем" if job.cancel_event.is_set() else reason)
             finally:
-                if job.process is not None and job.process.poll() is not None: job.process = None
+                if job.process is not None:
+                    self._terminate(job)
+                    job.process.wait()
+                    job.process = None
 
     def _run_attempt(self, job: DownloadJob, args: list[str], attempt_id: str) -> tuple[int, str]:
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0  # type: ignore[attr-defined]
-        try: process = self._popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0, shell=False, creationflags=flags)
-        except OSError as exc: job.diagnostic_tail.append(str(exc)); return 127, ""
         with self._lock:
-            if job.attempt_id != attempt_id: return 1, ""
+            if job.attempt_id != attempt_id:
+                return 1, ""
+            try: process = self._popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0, shell=False, creationflags=flags)
+            except OSError as exc: job.diagnostic_tail.append(str(exc)); return 127, ""
             job.process = process
         self._publish(job, "yt-dlp запущен; получение метаданных")
         if job.cancel_event.is_set(): self._terminate(job)
@@ -224,7 +330,18 @@ class ProcessManager:
         try:
             for raw in process.stdout:
                 text = decode_process_output(raw).rstrip("\r\n"); job.diagnostic_tail.append(text); self._safe_log(job, text)
-                if text.startswith("__YTM_PROGRESS__"):
+                if text.startswith("__YTM_SELECTION__"):
+                    try:
+                        selection = json.loads(text[len("__YTM_SELECTION__"):])
+                        selected = None
+                        if isinstance(selection, list) and len(selection) == 2:
+                            format_id, streams = selection
+                            selected = "+".join(streams) if isinstance(streams, list) and streams and all(isinstance(x, str) for x in streams) else format_id
+                        if isinstance(selected, str) and explicit_format(selected):
+                            job.resolved_format = selected
+                            self._persist()
+                    except (ValueError, TypeError): pass
+                elif text.startswith("__YTM_PROGRESS__"):
                     if job.stage != "downloading": job.status = job.stage = "downloading"; self._publish(job, "Скачивание")
                     self._progress(job, text[len("__YTM_PROGRESS__"):], attempt_id)
                 elif text.startswith("__YTM_RESULT__"):
@@ -234,6 +351,9 @@ class ProcessManager:
             code = process.wait(); job.return_code = code
             return code, result
         finally:
+            if process.poll() is None:
+                self._terminate(job)
+                process.wait()
             try: process.stdout.close()
             except OSError: pass
             with self._lock:
@@ -258,6 +378,9 @@ class ProcessManager:
             if job.cancel_event.is_set(): raise RuntimeError("остановлено")
             return code, bytes(output)
         finally:
+            if process.poll() is None:
+                self._terminate(job)
+                process.wait()
             try: process.stdout.close()
             except OSError: pass
             job.process = None
@@ -298,17 +421,26 @@ class ProcessManager:
         except Exception as exc: self._safe_log(job, f"Не удалось записать историю: {exc}")
 
     def retry(self, job_id: str) -> bool:
-        job = self.jobs.get(job_id)
-        if not job or job.status not in {"error", "interrupted", "retry_wait", "stopped"}: return False
-        if job.status == "retry_wait": job.retry_now.set(); return True
-        job.cancel_event.clear(); job.retry_now.clear(); job.status = job.stage = "queued"; self._publish(job, "Продолжение добавлено в очередь"); threading.Thread(target=self._worker, args=(job,), daemon=True).start(); return True
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if not job or job.status not in {"error", "interrupted", "retry_wait", "stopped"}: return False
+            if job.status == "retry_wait":
+                if job.cancel_event.is_set(): return False
+                job.retry_now.set(); return True
+            self._conflict(windows_path_key(job.output_template), job.request, job)
+            self._claim(job)
+            job.resuming = True
+            job.cancel_event.clear(); job.retry_now.clear(); job.status = job.stage = "queued"
+            job.completed_at = ""; job.next_retry_at = ""
+        self._launch(job)
+        return True
 
     def stop(self, job_id: str = "") -> bool:
         targets = [self.jobs[job_id]] if job_id in self.jobs else list(self.jobs.values()) if not job_id else []; changed = False
         for job in targets:
             if job.status not in ACTIVE: continue
             changed = True; job.cancel_event.set(); self._terminate(job)
-            if job.process is None: self._finish(job, "stopped", "Остановлено пользователем")
+            # Only the worker may mark completion and release its run lease.
         return changed
 
     def _terminate(self, job: DownloadJob) -> None:
