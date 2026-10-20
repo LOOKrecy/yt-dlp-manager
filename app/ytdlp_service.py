@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import re
 from pathlib import Path
@@ -205,9 +206,9 @@ def build_format_command(request: FormatRequest) -> list[str]:
     return args
 
 
-def build_download_command(request: DownloadRequest, attempt: int = 1, output_template: str = "") -> list[str]:
+def build_download_command(request: DownloadRequest, attempt: int = 1, output_template: str = "", resolved_format: str = "") -> list[str]:
     validate_download_request(request)
-    args = [str(YT_DLP_PATH), "--ignore-config", "--no-playlist", "--newline", "--part", "--progress", "--no-quiet", "--socket-timeout", str(request.socket_timeout), "--retries", "3", "--fragment-retries", "3", "--retry-sleep", "http:3", "--retry-sleep", "fragment:3"]
+    args = [str(YT_DLP_PATH), "--ignore-config", "--no-playlist", "--newline", "--no-simulate", "--part", "--progress", "--no-quiet", "--socket-timeout", str(request.socket_timeout), "--retries", "3", "--fragment-retries", "3", "--retry-sleep", "http:3", "--retry-sleep", "fragment:3"]
     # yt-dlp resumes matching .part files by default.  Keep this explicit so a
     # user's extra arguments cannot make the manager's option ambiguous.
     # Restart affects only the first invocation of a logical job. Automatic
@@ -219,6 +220,7 @@ def build_download_command(request: DownloadRequest, attempt: int = 1, output_te
     add_deno_runtime_arg(args, request)
     add_access_args(args, request)
     add_download_mode_args(args, request)
+    args.extend(["--print", "before_dl:__YTM_SELECTION__[%(format_id)j,%(requested_formats.:.format_id)j]"])
     add_section_args(args, request)
 
     if request.conflict_policy == "overwrite" and attempt == 1:
@@ -231,8 +233,88 @@ def build_download_command(request: DownloadRequest, attempt: int = 1, output_te
     args.extend(["--progress-template", "download:__YTM_PROGRESS__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s|%(info.format_id)s"])
     args.extend(["--print", "after_move:__YTM_RESULT__%(filepath)s"])
     args.extend(split_extra_args(request.extra_args))
+    if resolved_format:
+        args.extend(["-f", resolved_format])
     args.append(request.url.strip())
     return args
+
+
+def positive_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (float, int)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def codec_state(item: dict, key: str) -> str:
+    if key not in item:
+        return "missing"
+    value = item[key]
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if not value:
+            return "empty"
+        if value == "none":
+            return "absent"
+        if value not in {"unknown", "?", "n/a", "na"}:
+            return "known"
+    return "unknown"
+
+
+def classify_stream(item: dict) -> tuple[str, str]:
+    """Combine explicit evidence; missing/unknown codecs never mean no stream."""
+    evidence: dict[str, set[bool]] = {"video": set(), "audio": set()}
+    for role, key in (("video", "vcodec"), ("audio", "acodec")):
+        state = codec_state(item, key)
+        if state in {"known", "absent"}:
+            evidence[role].add(state == "known")
+        ext_state = codec_state(item, role + "_ext")
+        if ext_state in {"known", "absent"}:
+            evidence[role].add(ext_state == "known")
+    resolution = str(item.get("resolution") or "").strip().lower()
+    if resolution in {"audio only", "video only"}:
+        evidence["video"].add(resolution == "video only")
+        evidence["audio"].add(resolution == "audio only")
+    if positive_number(item.get("width")) or positive_number(item.get("height")):
+        evidence["video"].add(True)
+    if any(len(values) > 1 for values in evidence.values()):
+        return "unknown", "conflicting_stream_evidence"
+    video, audio = evidence["video"], evidence["audio"]
+    if video == {True} and audio == {True}:
+        return "muxed", "video_and_audio_present"
+    if video == {True} and audio == {False}:
+        return "video", "video_present_audio_absent"
+    if video == {False} and audio == {True}:
+        return "audio", "audio_present_video_absent"
+    return "unknown", "insufficient_stream_evidence"
+
+
+def format_bitrate(item: dict, kind: str) -> float | None:
+    tbr, vbr, abr = (positive_number(item.get(key)) for key in ("tbr", "vbr", "abr"))
+    if kind == "audio":
+        return abr or tbr
+    if kind == "video":
+        return vbr or tbr
+    if kind == "muxed":
+        return tbr or (positive_number(vbr + abr) if vbr and abr else None)
+    return None
+
+
+def format_size(item: dict, duration: float | None, bitrate: float | None) -> tuple[int | None, str]:
+    for key, source in (("filesize", "exact"), ("filesize_approx", "extractor_estimate")):
+        value = positive_number(item.get(key))
+        if value and int(value) > 0:
+            return int(value), source
+    if duration and bitrate:
+        value = positive_number(duration * bitrate * 1000 / 8)
+        if value and int(value) > 0:
+            return int(value), "bitrate_estimate"
+    return None, "unknown"
 
 
 def parse_formats_metadata(raw_output: str) -> tuple[list[FormatItem], dict]:
@@ -248,17 +330,25 @@ def parse_formats_metadata(raw_output: str) -> tuple[list[FormatItem], dict]:
         if not isinstance(item, dict):
             raise ValueError(f"Некорректный элемент formats[{index}]")
         format_id = item.get("format_id")
-        if not isinstance(format_id, (str, int)) or not str(format_id).strip():
+        if isinstance(format_id, bool) or not isinstance(format_id, (str, int)) or not str(format_id).strip():
             raise ValueError(f"В formats[{index}] отсутствует format_id")
-        for key in ("filesize", "filesize_approx", "fps"):
-            if item.get(key) is not None and not isinstance(item[key], (int, float)):
-                raise ValueError(f"Поле formats[{index}].{key} должно быть числом")
-        v, a = item.get("vcodec") or "none", item.get("acodec") or "none"
-        kind = "muxed" if v != "none" and a != "none" else "video" if v != "none" else "audio" if a != "none" else "unknown"
-        exact, estimate = item.get("filesize"), item.get("filesize_approx")
-        size = exact if exact is not None else estimate
-        result.append(FormatItem(format_id=str(format_id), extension=str(item.get("ext") or ""), resolution=str(item.get("resolution") or ""), fps=str(item.get("fps") or ""), video=str(v), audio=str(a), size_bytes=int(size or 0), note=str(item.get("format_note") or ""), audio_name=str(item.get("format") or item.get("format_note") or ""), protocol=str(item.get("protocol") or ""), language=str(item.get("language") or ""), dynamic_range=str(item.get("dynamic_range") or ""), kind=kind, approximate=exact is None and estimate is not None))
+        kind, reason = classify_stream(item)
+        duration = positive_number(item.get("duration")) or positive_number(metadata.get("duration"))
+        bitrate = format_bitrate(item, kind)
+        size, source = format_size(item, duration, bitrate)
+        result.append(FormatItem(
+            format_id=str(format_id), extension=str(item.get("ext") or ""),
+            resolution=str(item.get("resolution") or ""), fps=str(item.get("fps") or ""),
+            video=str(item.get("vcodec") or ""), audio=str(item.get("acodec") or ""),
+            size_bytes=size, size_source=source, duration=duration, bitrate=bitrate,
+            note=str(item.get("format_note") or ""), audio_name=str(item.get("format") or item.get("format_note") or ""),
+            protocol=str(item.get("protocol") or ""), language=str(item.get("language") or ""),
+            dynamic_range=str(item.get("dynamic_range") or ""), kind=kind, kind_reason=reason,
+            codec_states={key: codec_state(item, key) for key in ("vcodec", "acodec")},
+            approximate=source not in {"exact", "unknown"}))
     diagnostic = {key: metadata.get(key) for key in ("id", "title", "extractor", "duration", "webpage_url_domain") if metadata.get(key) is not None}
+    if "duration" in diagnostic:
+        diagnostic["duration"] = positive_number(diagnostic["duration"])
     diagnostic["format_count"] = len(result)
     return result, diagnostic
 
@@ -321,3 +411,29 @@ def find_result_file_from_logs(lines: list[str]) -> str:
         if path.exists():
             return str(path)
     return candidates[-1] if candidates else ""
+
+
+EXPLICIT_FORMAT = re.compile(r"[A-Za-z0-9_.-]+(?:\+[A-Za-z0-9_.-]+)?")
+
+
+def explicit_format(value: str) -> bool:
+    if not EXPLICIT_FORMAT.fullmatch(value):
+        return False
+    extensions = {"mp4", "m4a", "webm", "mkv", "mov", "mp3", "aac", "flac", "wav", "opus", "ogg", "oga", "mka", "m4v", "avi", "flv", "3gp", "3g2", "mpg", "mpeg", "ts", "m2ts", "aiff", "alac"}
+    automatic = re.compile(r"(?:(?:best|worst)(?:video|audio)?|[bw](?:v|a)?)(?:\.\d+)?$", re.IGNORECASE)
+    return all(part.lower() not in extensions | {"all", "mergeall"} and not automatic.fullmatch(part)
+               for part in value.split("+"))
+
+
+def result_parameters(request: DownloadRequest) -> dict:
+    """Conservative identity: exclude only naming, UI and retry controls."""
+    return request.model_dump(exclude={
+        "last_url", "download_dir", "filename_template", "conflict_policy", "resume_policy",
+        "resume_downloads", "auto_retry", "max_restarts", "socket_timeout", "http_chunk_size", "max_concurrent"})
+
+
+def compatible_requests(old: DownloadRequest, new: DownloadRequest) -> bool:
+    return (old.download_mode == new.download_mode == "manual"
+            and explicit_format(old.selected_format) and explicit_format(new.selected_format)
+            and not old.extra_args.strip() and not new.extra_args.strip()
+            and result_parameters(old) == result_parameters(new))

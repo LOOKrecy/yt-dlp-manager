@@ -64,3 +64,19 @@ def test_redaction_supports_separate_and_equals_forms_without_mutation():
     assert safe[2] == "***" and safe[3] == "--password=***" and safe[-1].endswith("?…")
     diagnostic = redact_diagnostic_text("--password secret token=abc https://cdn.test/a?token=abc")
     assert "secret" not in diagnostic and "abc" not in diagnostic
+
+
+def test_resume_pins_actual_selection_after_expert_args(monkeypatch, tmp_path):
+    import app.ytdlp_service as service
+    executable = tmp_path / 'yt-dlp.exe'; executable.write_bytes(b'x')
+    monkeypatch.setattr(service, 'YT_DLP_PATH', executable)
+    request = DownloadRequest(url='https://example.test', download_dir=str(tmp_path), extra_args='--format best')
+    args = build_download_command(request, 2, str(tmp_path/'stable.%(ext)s'), '137+140')
+    assert args[-3:] == ['-f','137+140',request.url]
+    assert '--no-simulate' in args and '--continue' in args
+
+
+@pytest.mark.parametrize('selector', ['best.2','bestvideo.2','bestaudio.2','bv.2','wv','wa','mp4','m4a','all','mergeall','137+ba','137+140/best','137[height=720]'])
+def test_automatic_and_complex_selectors_are_never_explicit_compatibility(selector):
+    from app.ytdlp_service import explicit_format
+    assert not explicit_format(selector)

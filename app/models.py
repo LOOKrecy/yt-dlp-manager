@@ -70,7 +70,7 @@ class FormatItem(BaseModel):
     video: str = ""
     audio: str = ""
     size: str = ""
-    size_bytes: int = 0
+    size_bytes: int | None = None
     note: str = ""
     audio_name: str = ""
     raw: str = ""
@@ -79,6 +79,11 @@ class FormatItem(BaseModel):
     dynamic_range: str = ""
     kind: str = "unknown"
     approximate: bool = False
+    size_source: Literal["exact", "extractor_estimate", "bitrate_estimate", "unknown"] = "unknown"
+    duration: float | None = None
+    bitrate: float | None = None
+    kind_reason: str = ""
+    codec_states: dict[str, str] = Field(default_factory=dict)
 
 
 class HistoryEntry(BaseModel):
